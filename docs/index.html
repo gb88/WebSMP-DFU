@@ -556,19 +556,32 @@ async function parseZip(file) {
     const imageIndex = parseInt(entry.image_index ?? entry.image ?? i, 10);
     const imgType    = (entry.type || 'application').toLowerCase();
 
+    // slot_index_primary   = the slot the active image runs from
+    // slot_index_secondary = the slot we upload the new image into
+    // On nRF52/53: primary=0, secondary=1
+    // On nRF54L:   primary=1, secondary=2
+    // These are flash partition slot indices, NOT McuManager image numbers
+    const slotPrimary   = entry.slot_index_primary   != null ? parseInt(entry.slot_index_primary,   10) : null;
+    const slotSecondary = entry.slot_index_secondary  != null ? parseInt(entry.slot_index_secondary, 10) : null;
+
     images.push({
       imageIndex,
       data, sha, filename,
-      version: entry.version_MCUBOOT || entry.version || val.ver,
-      type:    imgType,
-      board:   entry.board || '',
-      soc:     entry.soc   || '',
-      size:    entry.size  || data.length,
-      valid:   val.ok,
-      valMsg:  val.msg,
+      version:        entry.version_MCUBOOT || entry.version || val.ver,
+      type:           imgType,
+      board:          entry.board || '',
+      soc:            entry.soc   || '',
+      size:           entry.size  || data.length,
+      valid:          val.ok,
+      valMsg:         val.msg,
+      slotPrimary,    // flash slot index of the running image  (e.g. 0 or 1)
+      slotSecondary,  // flash slot index we upload into        (e.g. 1 or 2)
     });
 
-    log(`  img${imageIndex} (${imgType}): ${filename} ${fmtB(data.length)} — ${val.msg}`, val.ok?'success':'warn');
+    const slotInfo = (slotSecondary != null)
+      ? ` · primary slot=${slotPrimary} secondary slot=${slotSecondary}`
+      : '';
+    log(`  img${imageIndex} (${imgType}): ${filename} ${fmtB(data.length)}${slotInfo} — ${val.msg}`, val.ok?'success':'warn');
   }
 
   return { images, pkgType, manifest };
@@ -961,32 +974,37 @@ function logImageState(imgs, context) {
   });
 }
 
-// Find the best candidate image for TEST (the newly uploaded one, not yet active)
-// Priority:
-//   1. Same image number, slot=1, not active
-//   2. Same image number, not active (slot field may be missing on some firmware)
-//   3. Any image that is pending=false, not active (just uploaded)
-//   4. Any image that is not active
-//   5. Any image at all (DirectXIP / single-slot — no swap needed, skip TEST)
-function findPendingImage(imgs, imgNum) {
-  // Normalise: image field can be missing (defaults to 0)
+// Find the best candidate image for TEST/CONFIRM (the newly uploaded one)
+// slotSecondary comes from manifest slot_index_secondary (e.g. 1 for nRF52, 2 for nRF54L)
+// The SMP image state response uses the same slot indices as the flash partition table.
+function findPendingImage(imgs, imgNum, slotSecondary) {
   const forImg = imgs.filter(i => (i.image ?? 0) === imgNum);
   const all    = imgs;
 
+  // If we know the exact secondary slot from the manifest, use it directly
+  if (slotSecondary != null) {
+    const bySlot =
+      forImg.find(i => i.slot === slotSecondary && !i.active) ||
+      forImg.find(i => i.slot === slotSecondary)              ||
+      all.find(i   => i.slot === slotSecondary && !i.active)  ||
+      all.find(i   => i.slot === slotSecondary);
+    if (bySlot) return bySlot;
+    // Not found by exact slot — fall through to heuristics and log a warning
+  }
+
+  // Heuristic fallbacks when slot_index_secondary is not in manifest
   return (
-    forImg.find(i => i.slot === 1 && !i.active)           ||  // ideal: slot 1, not active
-    forImg.find(i => i.slot === 1)                         ||  // slot 1, maybe active (DirectXIP)
-    forImg.find(i => !i.active && !i.confirmed)            ||  // not active, not confirmed
-    forImg.find(i => !i.active)                            ||  // not active
-    all.find(i => i.slot === 1 && !i.active)               ||  // any slot-1
-    all.find(i => !i.active)                               ||  // any non-active
-    forImg[forImg.length - 1]                              ||  // last image for this imgNum
-    all[all.length - 1]                                        // absolute fallback
+    forImg.find(i => !i.active && !i.confirmed)  ||  // just uploaded, not running
+    forImg.find(i => !i.active)                  ||  // not active
+    all.find(i   => !i.active && !i.confirmed)   ||  // any non-active unconfirmed
+    all.find(i   => !i.active)                   ||  // any non-active
+    forImg[forImg.length - 1]                    ||  // last for this imgNum
+    all[all.length - 1]                              // absolute fallback
   );
 }
 
-async function testImg(imgNum){
-  log(`TEST img${imgNum}…`,'info');
+async function testImg(imgNum, slotSecondary){
+  log(`TEST img${imgNum}… (secondary slot=${slotSecondary??'unknown'})`,'info');
   // Small delay to let device finalise write before querying state
   await sleep(300);
   const sr=await rpc(mkFrame(OP_RD,GRP_IMG,IMG_STATE,{}),8000);
@@ -995,7 +1013,7 @@ async function testImg(imgNum){
 
   if(!imgs.length) throw new Error('Device returned no images in state response');
 
-  const tgt = findPendingImage(imgs, imgNum);
+  const tgt = findPendingImage(imgs, imgNum, slotSecondary);
   if(!tgt) throw new Error(`No candidate image found for img${imgNum} — check device image state in console`);
 
   if(!tgt.hash){
@@ -1020,8 +1038,8 @@ async function testImg(imgNum){
   log(`img${imgNum} set for test boot`,'success');
 }
 
-async function confirmImg(imgNum){
-  log(`CONFIRM img${imgNum}…`,'info');
+async function confirmImg(imgNum, slotPrimary){
+  log(`CONFIRM img${imgNum}… (primary slot=${slotPrimary??'unknown'})`,'info');
   await sleep(300);
   const sr=await rpc(mkFrame(OP_RD,GRP_IMG,IMG_STATE,{}),8000);
   const imgs=sr.body?.images||[];
@@ -1029,9 +1047,14 @@ async function confirmImg(imgNum){
 
   if(!imgs.length){ log('No images in state — skipping confirm','warn'); return; }
 
-  // After reboot: look for active+unconfirmed first, then any unconfirmed
+  // After reboot the new image runs from slotPrimary and is unconfirmed
   const forImg = imgs.filter(i => (i.image ?? 0) === imgNum);
-  const tgt =
+  const bySlot = slotPrimary != null
+    ? forImg.find(i => i.slot === slotPrimary && !i.confirmed) ||
+      imgs.find(i  => i.slot === slotPrimary && !i.confirmed)
+    : null;
+
+  const tgt = bySlot ||
     forImg.find(i => i.active && !i.confirmed)  ||
     forImg.find(i => !i.confirmed)              ||
     imgs.find(i  => i.active && !i.confirmed)   ||
@@ -1135,14 +1158,14 @@ async function startDfu(){
     // TEST / CONFIRM (pre-reset)
     if(mode==='test_and_confirm'||mode==='test_only'){
       ph('phT','phase cur');log('── TEST','info');
-      for(const img of images)await testImg(img.imageIndex);
+      for(const img of images)await testImg(img.imageIndex, img.slotSecondary);
       ph('phT','phase done');
     }else if(mode==='confirm_only'){
       ph('phT','phase skip');
       ph('phC',`phase cur${isMcubootPkg?' warn-phase':''}`);
       log('── CONFIRM (pre-reset)'+(isMcubootPkg?' — MCUboot, no revert possible':''),'info');
       if(isMcubootPkg) log('⚠ Confirming MCUboot — device cannot recover if bootloader fails to boot','warn');
-      for(const img of images)await confirmImg(img.imageIndex);
+      for(const img of images)await confirmImg(img.imageIndex, img.slotPrimary);
       ph('phC','phase done');
     }else{
       ph('phT','phase skip');ph('phC','phase skip');
@@ -1157,7 +1180,7 @@ async function startDfu(){
       ph('phC','phase cur');log('── CONFIRM (post-reset)','info');
       try{
         await reconnect(8,2000);
-        for(const img of images)await confirmImg(img.imageIndex);
+        for(const img of images)await confirmImg(img.imageIndex, img.slotPrimary);
         ph('phC','phase done');await refreshImages();
       }catch(e){
         log('Auto-confirm failed: '+e.message,'warn');
