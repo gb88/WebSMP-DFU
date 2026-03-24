@@ -1,0 +1,1029 @@
+<!DOCTYPE html>
+<!--
+  nRF Web DFU
+  -----------
+  Web Bluetooth DFU tool for Nordic nRF devices using McuManager / SMP protocol.
+
+  License: MIT
+  Copyright (c) 2024 — Your Name / Your Company
+
+  Protocol spec:
+    https://docs.zephyrproject.org/latest/services/device_mgmt/smp_protocol.html
+    https://docs.zephyrproject.org/latest/services/device_mgmt/smp_groups/smp_group_1.html
+
+  Inspired by (Apache 2.0):
+    https://github.com/NordicSemiconductor/Android-nRF-Connect-Device-Manager
+
+  Dependencies:
+    JSZip 3.10.1 — MIT license — https://stuk.github.io/jszip/
+-->
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>nRF Web DFU — McuManager</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;700&family=Syne:wght@400;600;700;800&display=swap');
+  :root {
+    --bg:#0a0c10;--surface:#111318;--surface2:#181b22;
+    --border:#252830;--border-b:#353a46;
+    --nb:#00a9ce;--ng:#00c896;--na:#f0a500;--nr:#e8375a;--np:#a855f7;
+    --text:#e8eaf0;--text-dim:#6b7080;--text-muted:#3d4050;
+    --mono:'JetBrains Mono',monospace;--sans:'Syne',sans-serif;
+  }
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{background:var(--bg);color:var(--text);font-family:var(--sans);min-height:100vh;overflow-x:hidden}
+  body::before{content:'';position:fixed;inset:0;background-image:linear-gradient(rgba(0,169,206,.03) 1px,transparent 1px),linear-gradient(90deg,rgba(0,169,206,.03) 1px,transparent 1px);background-size:40px 40px;pointer-events:none;z-index:0}
+  .app{position:relative;z-index:1;max-width:940px;margin:0 auto;padding:32px 24px 80px}
+
+  /* Header */
+  header{display:flex;align-items:center;justify-content:space-between;margin-bottom:40px;padding-bottom:24px;border-bottom:1px solid var(--border)}
+  .logo{display:flex;align-items:center;gap:14px}
+  .logo-icon{width:40px;height:40px;background:linear-gradient(135deg,var(--nb),var(--ng));border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:20px;box-shadow:0 0 20px rgba(0,169,206,.3)}
+  .logo-text h1{font-size:18px;font-weight:700}
+  .logo-text p{font-size:11px;font-family:var(--mono);color:var(--text-dim);margin-top:2px}
+  .status-badge{font-family:var(--mono);font-size:11px;padding:5px 12px;border-radius:20px;background:var(--surface);border:1px solid var(--border);color:var(--text-dim);display:flex;align-items:center;gap:7px;transition:all .3s}
+  .status-badge.connected{border-color:var(--ng);color:var(--ng);background:rgba(0,200,150,.08);box-shadow:0 0 12px rgba(0,200,150,.15)}
+  .status-dot{width:7px;height:7px;border-radius:50%;background:var(--text-muted)}
+  .status-badge.connected .status-dot{background:var(--ng);animation:pulse 2s infinite}
+  @keyframes pulse{0%,100%{opacity:1;box-shadow:0 0 0 0 rgba(0,200,150,.5)}50%{opacity:.8;box-shadow:0 0 0 4px rgba(0,200,150,0)}}
+
+  /* Cards */
+  .card{background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:28px;margin-bottom:16px}
+  .card-header{display:flex;align-items:center;gap:12px;margin-bottom:20px}
+  .sn{width:28px;height:28px;border-radius:8px;background:var(--surface2);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;font-family:var(--mono);font-size:12px;font-weight:700;color:var(--text-dim);flex-shrink:0;transition:all .3s}
+  .sn.done{background:rgba(0,200,150,.15);border-color:var(--ng);color:var(--ng)}
+  .sn.cur{background:rgba(0,169,206,.15);border-color:var(--nb);color:var(--nb)}
+  .card-title{font-size:15px;font-weight:700}
+  .card-sub{font-size:12px;font-family:var(--mono);color:var(--text-dim);margin-top:2px}
+
+  /* Buttons */
+  .btn{font-family:var(--sans);font-weight:600;font-size:13px;padding:10px 20px;border-radius:10px;border:none;cursor:pointer;transition:all .2s;display:inline-flex;align-items:center;gap:8px}
+  .btn:disabled{opacity:.3;cursor:not-allowed;pointer-events:none}
+  .btn-p{background:var(--nb);color:#000;box-shadow:0 0 20px rgba(0,169,206,.2)}
+  .btn-p:hover{background:#00c4ef;box-shadow:0 0 28px rgba(0,169,206,.4);transform:translateY(-1px)}
+  .btn-g{background:var(--surface2);color:var(--text-dim);border:1px solid var(--border)}
+  .btn-g:hover{border-color:var(--border-b);color:var(--text)}
+  .btn-d{background:rgba(232,55,90,.12);color:var(--nr);border:1px solid rgba(232,55,90,.25)}
+  .btn-d:hover{background:rgba(232,55,90,.2);border-color:var(--nr)}
+  .btn-s{background:var(--ng);color:#000}
+  .btn-s:hover{background:#00e6ac}
+  .btn-warn{background:rgba(240,165,0,.12);color:var(--na);border:1px solid rgba(240,165,0,.3)}
+  .btn-warn:hover{background:rgba(240,165,0,.2)}
+
+  /* Drop zone */
+  .drop-zone{border:2px dashed var(--border);border-radius:12px;padding:40px 24px;text-align:center;cursor:pointer;transition:all .3s;background:var(--surface2);position:relative}
+  .drop-zone:hover,.drop-zone.dg{border-color:var(--nb);background:rgba(0,169,206,.05)}
+  .drop-zone input{position:absolute;inset:0;opacity:0;cursor:pointer;width:100%;height:100%}
+
+  /* Package panel */
+  .pkg-panel{margin-top:16px;background:var(--surface2);border:1px solid var(--border);border-radius:12px;overflow:hidden}
+  .pkg-panel.mcuboot-pkg{border-color:rgba(240,165,0,.4)}
+  .pkg-header{padding:14px 18px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px}
+  .pkg-name{font-family:var(--mono);font-size:13px;font-weight:500}
+  .pkg-name.app-pkg{color:var(--ng)}
+  .pkg-name.mcuboot-pkg-lbl{color:var(--na)}
+  .pkg-meta{font-family:var(--mono);font-size:11px;color:var(--text-dim)}
+  .pkg-images{padding:12px 18px;display:flex;flex-direction:column;gap:8px}
+  .pkg-img-row{background:var(--bg);border:1px solid var(--border);border-radius:10px;padding:12px 16px;display:flex;align-items:flex-start;justify-content:space-between;flex-wrap:wrap;gap:8px}
+  .pkg-img-row.mcuboot-row{border-color:rgba(240,165,0,.3)}
+  .pkg-img-lbl{font-family:var(--mono);font-size:10px;color:var(--text-dim);text-transform:uppercase;letter-spacing:.8px;margin-bottom:3px}
+  .pkg-img-val{font-family:var(--mono);font-size:13px;font-weight:600}
+  .pkg-img-sub{font-family:var(--mono);font-size:11px;color:var(--text-dim);margin-top:3px}
+  .tags{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+  .tag{font-family:var(--mono);font-size:10px;padding:3px 9px;border-radius:10px;border:1px solid var(--border);color:var(--text-dim)}
+  .tag.blue{border-color:var(--nb);color:var(--nb);background:rgba(0,169,206,.1)}
+  .tag.green{border-color:var(--ng);color:var(--ng);background:rgba(0,200,150,.1)}
+  .tag.amber{border-color:var(--na);color:var(--na);background:rgba(240,165,0,.1)}
+  .tag.purple{border-color:var(--np);color:var(--np);background:rgba(168,85,247,.1)}
+  .tag.red{border-color:var(--nr);color:var(--nr);background:rgba(232,55,90,.1)}
+
+  /* MCUboot warning panel */
+  .mcuboot-warning{background:rgba(240,165,0,.08);border:1px solid rgba(240,165,0,.35);border-radius:12px;padding:16px 20px;margin-top:14px;display:flex;gap:14px;align-items:flex-start}
+  .mcuboot-warning-text{font-family:var(--mono);font-size:12px;color:var(--na);line-height:1.7}
+  .mcuboot-warning-text strong{display:block;font-size:13px;font-weight:700;margin-bottom:6px}
+  .mcuboot-warning-text ul{margin-left:16px;margin-top:4px}
+  .mcuboot-warning-text li{margin-bottom:2px}
+
+  /* Device */
+  .dev-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px;margin-top:16px}
+  .dev-item{background:var(--surface2);border:1px solid var(--border);border-radius:10px;padding:12px 14px}
+  .dev-lbl{font-family:var(--mono);font-size:10px;color:var(--text-dim);text-transform:uppercase;letter-spacing:.8px;margin-bottom:4px}
+  .dev-val{font-family:var(--mono);font-size:12px;font-weight:500;word-break:break-all}
+  .img-list{margin-top:14px;display:flex;flex-direction:column;gap:8px}
+  .img-row{background:var(--surface2);border:1px solid var(--border);border-radius:10px;padding:12px 16px;display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:space-between}
+  .img-row-title{font-family:var(--mono);font-size:12px;font-weight:600}
+  .img-row-sub{font-family:var(--mono);font-size:11px;color:var(--text-dim)}
+
+  /* Settings */
+  .settings-row{display:flex;gap:12px;flex-wrap:wrap;margin-top:16px}
+  .s-item{flex:1;min-width:150px}
+  .s-lbl{font-family:var(--mono);font-size:11px;color:var(--text-dim);margin-bottom:6px;display:block}
+  .s-input,.s-select{width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:9px 12px;font-family:var(--mono);font-size:13px;color:var(--text);outline:none;transition:border-color .2s}
+  .s-input:focus,.s-select:focus{border-color:var(--nb)}
+  .s-select{cursor:pointer;appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' fill='none'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%236b7080' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 12px center}
+  .s-select:disabled{opacity:.5;cursor:not-allowed}
+  .tog-row{display:flex;align-items:center;gap:10px;margin-top:14px}
+  .tog{width:40px;height:22px;background:var(--surface2);border:1px solid var(--border);border-radius:11px;cursor:pointer;position:relative;transition:background .2s;flex-shrink:0}
+  .tog.on{background:var(--nb);border-color:var(--nb)}
+  .tog.warn-on{background:var(--na);border-color:var(--na)}
+  .tog::after{content:'';position:absolute;top:3px;left:3px;width:14px;height:14px;border-radius:50%;background:#fff;transition:transform .2s}
+  .tog.on::after,.tog.warn-on::after{transform:translateX(18px)}
+  .tog-lbl{font-family:var(--mono);font-size:12px;color:var(--text-dim)}
+
+  /* Progress */
+  .prog-label{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}
+  .prog-title{font-family:var(--mono);font-size:12px;color:var(--text-dim)}
+  .prog-pct{font-family:var(--mono);font-size:14px;font-weight:700;color:var(--nb)}
+  .prog-bar{height:6px;background:var(--surface2);border-radius:10px;overflow:hidden}
+  .prog-fill{height:100%;background:linear-gradient(90deg,var(--nb),var(--ng));border-radius:10px;transition:width .3s ease}
+  .prog-fill.mcuboot-fill{background:linear-gradient(90deg,var(--na),var(--nr))}
+  .prog-stats{display:flex;gap:20px;margin-top:10px;flex-wrap:wrap}
+  .prog-stat{font-family:var(--mono);font-size:11px;color:var(--text-dim)}
+  .prog-stat span{color:var(--text);font-weight:500}
+  .multi-prog{margin-top:14px;display:flex;flex-direction:column;gap:8px}
+  .mp-row{background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:10px 14px}
+  .mp-lbl{display:flex;justify-content:space-between;margin-bottom:6px}
+  .mp-name{font-family:var(--mono);font-size:11px;color:var(--text-dim)}
+  .mp-pct{font-family:var(--mono);font-size:11px;font-weight:700;color:var(--nb)}
+  .mp-bar{height:4px;background:var(--bg);border-radius:6px;overflow:hidden}
+  .mp-fill{height:100%;background:linear-gradient(90deg,var(--nb),var(--ng));border-radius:6px;transition:width .3s}
+
+  /* Phases */
+  .phases{display:flex;gap:8px;margin-top:20px;flex-wrap:wrap}
+  .phase{font-family:var(--mono);font-size:11px;padding:5px 12px;border-radius:20px;background:var(--surface2);border:1px solid var(--border);color:var(--text-muted);transition:all .3s}
+  .phase.cur{border-color:var(--nb);color:var(--nb);background:rgba(0,169,206,.1);animation:pp 1.5s infinite}
+  .phase.done{border-color:var(--ng);color:var(--ng);background:rgba(0,200,150,.1)}
+  .phase.skip{opacity:.3}
+  .phase.cur.warn-phase{border-color:var(--na);color:var(--na);background:rgba(240,165,0,.1)}
+  @keyframes pp{0%,100%{box-shadow:0 0 0 0 rgba(0,169,206,.3)}50%{box-shadow:0 0 0 4px rgba(0,169,206,.1)}}
+
+  /* Console */
+  .con-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
+  .con-left{display:flex;align-items:center;gap:10px}
+  .console{background:#08090d;border:1px solid var(--border);border-radius:12px;padding:14px;font-family:var(--mono);font-size:12px;height:240px;overflow-y:auto;line-height:1.7;scrollbar-width:thin;scrollbar-color:var(--border) transparent}
+  .console::-webkit-scrollbar{width:6px}.console::-webkit-scrollbar-track{background:transparent}.console::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}
+  .ll{display:flex;gap:10px;align-items:flex-start}
+  .lt{color:var(--text-muted);flex-shrink:0;font-size:11px}
+  .lm{color:var(--text-dim)}
+  .ll.success .lm{color:var(--ng)}.ll.warn .lm{color:var(--na)}.ll.error .lm{color:var(--nr)}.ll.data .lm{color:var(--nb)}
+
+  /* Banners */
+  .success-banner{background:rgba(0,200,150,.08);border:1px solid rgba(0,200,150,.3);border-radius:14px;padding:24px;text-align:center;display:none;margin-bottom:20px}
+  .success-banner.vis{display:block}
+  .info-banner{border-radius:12px;padding:16px 20px;display:flex;gap:14px;align-items:flex-start;margin-bottom:20px}
+  .info-banner.warn{background:rgba(240,165,0,.08);border:1px solid rgba(240,165,0,.3)}
+  .info-banner.err{background:rgba(232,55,90,.08);border:1px solid rgba(232,55,90,.3)}
+  .ib-text{font-family:var(--mono);font-size:12px;line-height:1.7}
+  .info-banner.warn .ib-text{color:var(--na)}
+  .info-banner.err .ib-text{color:var(--nr)}
+  .ib-text strong{display:block;font-size:13px;font-weight:700;margin-bottom:4px}
+
+  .abar{display:flex;gap:10px;margin-top:18px;flex-wrap:wrap;align-items:center}
+  .sep{height:1px;background:var(--border);margin:20px 0}
+  #toast{position:fixed;bottom:24px;right:24px;background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:14px 20px;font-family:var(--mono);font-size:13px;color:var(--text);z-index:100;transform:translateY(80px);opacity:0;transition:all .3s;max-width:360px;box-shadow:0 8px 32px rgba(0,0,0,.4)}
+  #toast.show{transform:translateY(0);opacity:1}
+  #toast.ts{border-color:var(--ng);color:var(--ng)}#toast.te{border-color:var(--nr);color:var(--nr)}#toast.tw{border-color:var(--na);color:var(--na)}
+  .hidden{display:none!important}
+  .progress-section{margin-top:20px}
+</style>
+</head>
+<body>
+<div class="app">
+
+  <header>
+    <div class="logo">
+      <div class="logo-icon">⚡</div>
+      <div class="logo-text">
+        <h1>nRF Web DFU</h1>
+        <p>McuManager · SMP · dfu_application.zip · dfu_mcuboot.zip</p>
+      </div>
+    </div>
+    <div class="status-badge" id="gStatus"><div class="status-dot"></div><span id="gTxt">Disconnected</span></div>
+  </header>
+
+  <!-- WebBluetooth not available -->
+  <div class="info-banner warn hidden" id="unsupBanner">
+    <div style="font-size:20px;flex-shrink:0">⚠️</div>
+    <div class="ib-text">
+      <strong>Web Bluetooth not available</strong>
+      Requires Chrome or Edge on desktop / Android. Enable chrome://flags/#enable-experimental-web-platform-features on Linux. Not supported on iOS or Firefox.
+    </div>
+  </div>
+
+  <!-- STEP 1: Package -->
+  <div class="card">
+    <div class="card-header">
+      <div class="sn cur" id="s1">1</div>
+      <div>
+        <div class="card-title">DFU Package</div>
+        <div class="card-sub">dfu_application.zip · dfu_mcuboot.zip · or raw .bin — from west build output</div>
+      </div>
+    </div>
+
+    <div class="drop-zone" id="dz">
+      <input type="file" id="fileIn" accept=".zip,.bin,.img">
+      <div style="font-size:36px;margin-bottom:14px">📦</div>
+      <div style="font-size:15px;font-weight:700;margin-bottom:8px">Drop DFU package here or click to browse</div>
+      <div style="display:flex;flex-wrap:wrap;justify-content:center;gap:8px;margin-bottom:6px">
+        <span class="tag green">dfu_application.zip</span>
+        <span class="tag amber">dfu_mcuboot.zip</span>
+        <span class="tag blue">raw .bin</span>
+      </div>
+      <div style="font-size:11px;font-family:var(--mono);color:var(--text-muted);margin-top:6px">ZIP contains manifest.json + .bin file(s) · nRF Connect SDK / west build output</div>
+    </div>
+
+    <div class="pkg-panel hidden" id="pkgPanel">
+      <div class="pkg-header">
+        <div>
+          <div class="pkg-name" id="pkgName">—</div>
+          <div class="pkg-meta" id="pkgMeta">—</div>
+        </div>
+        <button class="btn btn-g" id="clearFileBtn" style="padding:7px 14px;font-size:12px">✕ Clear</button>
+      </div>
+      <div class="pkg-images" id="pkgImages"></div>
+    </div>
+
+    <!-- MCUboot-specific warning, shown only for dfu_mcuboot.zip -->
+    <div class="mcuboot-warning hidden" id="mcubootWarning">
+      <div style="font-size:22px;flex-shrink:0">🔐</div>
+      <div class="mcuboot-warning-text">
+        <strong>MCUboot Bootloader Upgrade Detected</strong>
+        <ul>
+          <li>This package updates <strong>MCUboot itself</strong>, not the application.</li>
+          <li>Upgrade mode is locked to <strong>Confirm Only</strong> — MCUboot cannot revert itself.</li>
+          <li>If the new bootloader fails to boot, <strong>the device will be bricked</strong> and require a physical programmer to recover.</li>
+          <li>Ensure the package matches your exact board/SoC before proceeding.</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <!-- STEP 2: Connect -->
+  <div class="card">
+    <div class="card-header">
+      <div class="sn" id="s2">2</div>
+      <div>
+        <div class="card-title">BLE Device</div>
+        <div class="card-sub">Connect to device running MCUboot + SMP (Zephyr / nRF Connect SDK)</div>
+      </div>
+    </div>
+    <div class="abar" style="margin-top:0">
+      <button class="btn btn-p" id="connectBtn">⚡ Scan &amp; Connect</button>
+      <button class="btn btn-d hidden" id="discBtn">Disconnect</button>
+      <button class="btn btn-g hidden" id="refImgBtn">↻ Refresh Images</button>
+    </div>
+    <div class="dev-grid hidden" id="devGrid">
+      <div class="dev-item"><div class="dev-lbl">Device</div><div class="dev-val" id="devName">—</div></div>
+      <div class="dev-item"><div class="dev-lbl">SMP Service</div><div class="dev-val" id="smpSt">—</div></div>
+      <div class="dev-item"><div class="dev-lbl">Slots</div><div class="dev-val" id="devSlots">—</div></div>
+      <div class="dev-item"><div class="dev-lbl">Chunk Size</div><div class="dev-val" id="devChunk">—</div></div>
+    </div>
+    <div class="img-list hidden" id="imgList"></div>
+  </div>
+
+  <!-- STEP 3: Settings -->
+  <div class="card">
+    <div class="card-header">
+      <div class="sn" id="s3">3</div>
+      <div>
+        <div class="card-title">Upgrade Settings</div>
+        <div class="card-sub">Mode is auto-set based on package type; adjust transfer parameters as needed</div>
+      </div>
+    </div>
+    <div class="settings-row">
+      <div class="s-item">
+        <label class="s-lbl">Upgrade Mode</label>
+        <select class="s-select" id="upgradeMode">
+          <option value="test_and_confirm">Test &amp; Confirm (recommended for apps)</option>
+          <option value="confirm_only">Confirm Only (MCUboot / no-revert devices)</option>
+          <option value="test_only">Test Only</option>
+          <option value="none">None (Upload &amp; Reset)</option>
+        </select>
+      </div>
+      <div class="s-item">
+        <label class="s-lbl">Chunk Size (bytes)</label>
+        <input class="s-input" type="number" id="chunkSz" value="200" min="64" max="480">
+      </div>
+      <div class="s-item">
+        <label class="s-lbl">Reset Delay (ms)</label>
+        <input class="s-input" type="number" id="resetDly" value="6000" min="1000" max="30000">
+      </div>
+    </div>
+    <div class="tog-row"><div class="tog on" id="togErase"></div><span class="tog-lbl">Erase slot before upload (recommended)</span></div>
+    <div class="tog-row"><div class="tog on" id="togUpgrade"></div><span class="tog-lbl">Upgrade-only — reject lower/equal firmware version</span></div>
+    <!-- Shown only for MCUboot packages -->
+    <div class="info-banner warn hidden" id="modeLockedBanner" style="margin-top:14px;margin-bottom:0">
+      <div style="font-size:16px;flex-shrink:0">🔒</div>
+      <div class="ib-text">Upgrade mode locked to <strong>Confirm Only</strong> for MCUboot packages — reverting a bootloader is not possible.</div>
+    </div>
+  </div>
+
+  <!-- STEP 4: DFU -->
+  <div class="card">
+    <div class="card-header">
+      <div class="sn" id="s4">4</div>
+      <div>
+        <div class="card-title">Firmware Upgrade</div>
+        <div class="card-sub" id="dfuSubtitle">Upload all images from package, then test/confirm/reset</div>
+      </div>
+    </div>
+
+    <div class="success-banner" id="successBanner">
+      <div style="font-size:40px;margin-bottom:12px">✅</div>
+      <div style="font-size:20px;font-weight:800;color:var(--ng);margin-bottom:6px">Upgrade Complete!</div>
+      <div style="font-family:var(--mono);font-size:12px;color:var(--text-dim)" id="successSub"></div>
+    </div>
+
+    <div class="phases">
+      <div class="phase" id="phV">VALIDATE</div>
+      <div class="phase" id="phE">ERASE</div>
+      <div class="phase" id="phU">UPLOAD</div>
+      <div class="phase" id="phT">TEST</div>
+      <div class="phase" id="phR">RESET</div>
+      <div class="phase" id="phC">CONFIRM</div>
+    </div>
+
+    <div class="progress-section">
+      <div class="prog-label">
+        <span class="prog-title" id="progLbl">Ready</span>
+        <span class="prog-pct" id="progPct">0%</span>
+      </div>
+      <div class="prog-bar"><div class="prog-fill" id="progFill" style="width:0%"></div></div>
+      <div class="prog-stats">
+        <div class="prog-stat">Image: <span id="stImg">—</span></div>
+        <div class="prog-stat">Sent: <span id="stSent">0</span></div>
+        <div class="prog-stat">Speed: <span id="stSpeed">—</span></div>
+        <div class="prog-stat">ETA: <span id="stEta">—</span></div>
+        <div class="prog-stat">Retries: <span id="stRetry">0</span></div>
+      </div>
+    </div>
+
+    <div class="multi-prog hidden" id="multiProg"></div>
+
+    <div class="abar">
+      <button class="btn btn-s" id="startBtn" disabled>▶ Start DFU</button>
+      <button class="btn btn-g hidden" id="pauseBtn">⏸ Pause</button>
+      <button class="btn btn-d hidden" id="cancelBtn">✕ Cancel</button>
+    </div>
+
+    <div class="sep"></div>
+
+    <div class="con-header">
+      <div class="con-left">
+        <span style="font-size:12px;font-family:var(--mono);color:var(--text-dim)">Console</span>
+        <div class="tog on" id="togLog"></div>
+        <span class="tog-lbl">Show log</span>
+      </div>
+      <button class="btn btn-g" style="font-size:11px;padding:4px 10px" id="clearLogBtn">Clear</button>
+    </div>
+    <div class="console" id="console"></div>
+  </div>
+
+</div>
+<div id="toast"></div>
+
+<script>
+// =============================================================================
+// nRF Web DFU — McuManager SMP over Web Bluetooth
+// MIT License — see file header
+// =============================================================================
+
+const SMP_SVC  = '8d53dc1d-1db7-4cd3-868b-8a527460aa84';
+const SMP_CHAR = 'da2e7828-fbce-4e01-ae9e-261174997c48';
+const OP_RD=0,OP_WR=2,GRP_OS=0,GRP_IMG=1;
+const IMG_STATE=0,IMG_UPLOAD=1,IMG_ERASE=5,OS_RESET=5;
+const MCUBOOT_MAGIC=0x96f3b83d;
+
+// Package types
+const PKG_APPLICATION = 'application'; // dfu_application.zip
+const PKG_MCUBOOT     = 'mcuboot';     // dfu_mcuboot.zip
+
+// ── CBOR codec ────────────────────────────────────────────────────────────────
+const CBOR=(()=>{
+  function head(maj,n){const M=maj<<5;if(n<=23)return[M|n];if(n<=0xff)return[M|24,n];if(n<=0xffff)return[M|25,(n>>8)&0xff,n&0xff];return[M|26,(n>>24)&0xff,(n>>16)&0xff,(n>>8)&0xff,n&0xff];}
+  function enc(v){
+    if(v===null||v===undefined)return[0xf6];if(v===true)return[0xf5];if(v===false)return[0xf4];
+    if(typeof v==='number'){if(Number.isInteger(v)&&v>=0)return head(0,v);if(Number.isInteger(v)&&v<0)return head(1,-1-v);const b=new ArrayBuffer(4);new DataView(b).setFloat32(0,v,false);return[0xfa,...new Uint8Array(b)];}
+    if(typeof v==='string'){const u=new TextEncoder().encode(v);return[...head(3,u.length),...u];}
+    if(v instanceof Uint8Array)return[...head(2,v.length),...v];
+    if(v instanceof ArrayBuffer){const a=new Uint8Array(v);return[...head(2,a.length),...a];}
+    if(Array.isArray(v))return[...head(4,v.length),...v.flatMap(enc)];
+    if(typeof v==='object'){const ks=Object.keys(v);return[...head(5,ks.length),...ks.flatMap(k=>[...enc(k),...enc(v[k])])];}
+    return[0xf6];
+  }
+  function rh(dv,p){const b=dv.getUint8(p++),maj=b>>5,inf=b&0x1f;let n;if(inf<=23)n=inf;else if(inf===24)n=dv.getUint8(p++);else if(inf===25){n=dv.getUint16(p,false);p+=2;}else if(inf===26){n=dv.getUint32(p,false);p+=4;}else n=0;return[maj,n,p];}
+  function dec(dv,p){
+    const[maj,n,po]=rh(dv,p);
+    if(maj===0)return[n,po];if(maj===1)return[-1-n,po];
+    if(maj===2)return[new Uint8Array(dv.buffer.slice(dv.byteOffset+po,dv.byteOffset+po+n)),po+n];
+    if(maj===3){const b=new Uint8Array(dv.buffer,dv.byteOffset+po,n);return[new TextDecoder().decode(b),po+n];}
+    if(maj===4){let c=po,a=[];for(let i=0;i<n;i++){const[v,nc]=dec(dv,c);a.push(v);c=nc;}return[a,c];}
+    if(maj===5){let c=po,o={};for(let i=0;i<n;i++){const[k,c1]=dec(dv,c);const[v,c2]=dec(dv,c1);o[k]=v;c=c2;}return[o,c];}
+    if(maj===7){if(n===20)return[false,po];if(n===21)return[true,po];if(n===22)return[null,po];if(n===25)return[dv.getUint16(po,false),po+2];if(n===26)return[dv.getFloat32(po,false),po+4];}
+    return[undefined,po];
+  }
+  return{
+    encode:v=>new Uint8Array(enc(v)),
+    decode:ab=>{const u8=ab instanceof Uint8Array?ab:new Uint8Array(ab);return dec(new DataView(u8.buffer,u8.byteOffset,u8.byteLength),0)[0];}
+  };
+})();
+
+// ── SMP ────────────────────────────────────────────────────────────────────────
+let _seq=0;
+function mkFrame(op,grp,id,payload){
+  const cbor=CBOR.encode(payload),f=new Uint8Array(8+cbor.length),dv=new DataView(f.buffer);
+  dv.setUint8(0,op);dv.setUint8(1,0);dv.setUint16(2,cbor.length,false);dv.setUint16(4,grp,false);
+  dv.setUint8(6,(_seq++)&0xff);dv.setUint8(7,id);f.set(cbor,8);return f;
+}
+function parseFrame(d){
+  const u8=d instanceof Uint8Array?d:new Uint8Array(d.buffer??d);
+  const dv=new DataView(u8.buffer,u8.byteOffset);
+  const len=dv.getUint16(2,false);
+  return{op:dv.getUint8(0),grp:dv.getUint16(4,false),seq:dv.getUint8(6),id:dv.getUint8(7),
+    body:len>0?CBOR.decode(u8.subarray(8,8+len)):{}};
+}
+function getRC(b){if(!b)return 0;if(b.err?.rc)return b.err.rc;return b.rc||0;}
+
+// ── State ──────────────────────────────────────────────────────────────────────
+const S={
+  device:null,server:null,char:null,
+  pkgImages:[],   // [{imageIndex, data, sha, filename, version, type, size, valid, valMsg}]
+  pkgType: PKG_APPLICATION,  // 'application' or 'mcuboot'
+  pkgName:'',
+  running:false,paused:false,cancelled:false,
+  retries:0,startTime:null,
+  deviceImages:[],
+  nBuf:null,nFilled:0,nExpect:0,
+  res:null,rej:null,timer:null,
+};
+
+// ── UI ─────────────────────────────────────────────────────────────────────────
+const $=id=>document.getElementById(id);
+let logOn=true;
+function log(msg,type='info'){
+  if(!logOn)return;
+  const c=$('console'),t=new Date().toTimeString().slice(0,8);
+  const el=document.createElement('div');el.className=`ll ${type}`;
+  el.innerHTML=`<span class="lt">${t}</span><span class="lm">${esc(msg)}</span>`;
+  c.appendChild(el);c.scrollTop=c.scrollHeight;
+}
+function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
+function toast(m,t='i'){const el=$('toast');el.textContent=m;el.className=`show t${t}`;clearTimeout(el._t);el._t=setTimeout(()=>el.className='',3500);}
+function setSt(txt,conn=false){$('gTxt').textContent=txt;$('gStatus').className='status-badge'+(conn?' connected':'');}
+function ph(id,cls){const el=$(id);if(el)el.className='phase '+cls;}
+function resetPhases(){['phV','phE','phU','phT','phR','phC'].forEach(id=>ph(id,''));}
+function fmtB(n){if(n<1024)return n+' B';if(n<1048576)return(n/1024).toFixed(1)+' KB';return(n/1048576).toFixed(2)+' MB';}
+function toHex(v){const a=v instanceof Uint8Array?v:new Uint8Array(v instanceof ArrayBuffer?v:v.buffer??v);return Array.from(a).map(b=>b.toString(16).padStart(2,'0')).join('');}
+function setProg(pct,lbl){$('progFill').style.width=Math.min(100,pct)+'%';$('progPct').textContent=Math.round(pct)+'%';if(lbl)$('progLbl').textContent=lbl;}
+function updStartBtn(){$('startBtn').disabled=!(S.pkgImages.length&&S.char&&!S.running);}
+function sleep(ms){return new Promise(r=>setTimeout(r,ms));}
+
+// ── MCUboot header validation ─────────────────────────────────────────────────
+function validateBin(data){
+  if(data.length<32)return{ok:false,ver:'?',msg:'File too small'};
+  const dv=new DataView(data.buffer,data.byteOffset);
+  const magic=dv.getUint32(0,true);
+  if(magic!==MCUBOOT_MAGIC)return{ok:false,ver:'?',msg:`Bad magic 0x${magic.toString(16).padStart(8,'0')} — not a MCUboot image`};
+  const major=dv.getUint8(20),minor=dv.getUint8(21),rev=dv.getUint16(22,true),build=dv.getUint32(24,true);
+  const ver=`${major}.${minor}.${rev}+${build}`;
+  return{ok:true,ver,imgSz:dv.getUint32(12,true),msg:`✓ MCUboot v${ver} · ${fmtB(dv.getUint32(12,true))} declared`};
+}
+
+// ── Detect package type from manifest ────────────────────────────────────────
+// dfu_application.zip → all entries have type "application"
+// dfu_mcuboot.zip     → at least one entry has type "mcuboot"
+function detectPackageType(manifest) {
+  const files = manifest.files || [];
+  if (files.some(f => (f.type||'').toLowerCase() === 'mcuboot')) return PKG_MCUBOOT;
+  // Also detect by filename if type field is missing
+  if (files.some(f => (f.file||'').toLowerCase().includes('mcuboot'))) return PKG_MCUBOOT;
+  return PKG_APPLICATION;
+}
+
+// ── ZIP parser ─────────────────────────────────────────────────────────────────
+async function parseZip(file) {
+  const zip  = await JSZip.loadAsync(await file.arrayBuffer());
+  const mf   = zip.file('manifest.json');
+  if (!mf) throw new Error('manifest.json not found in ZIP');
+  const manifest = JSON.parse(await mf.async('string'));
+  const fmtVer   = manifest['format-version'] ?? 0;
+  log(`manifest.json: format-version=${fmtVer}, name="${manifest.name||'—'}"`, 'data');
+
+  const files = manifest.files;
+  if (!files?.length) throw new Error('No files listed in manifest.json');
+
+  const pkgType = detectPackageType(manifest);
+  const images  = [];
+
+  for (let i = 0; i < files.length; i++) {
+    const entry    = files[i];
+    const filename = entry.file;
+    if (!filename) throw new Error(`Entry ${i}: missing "file" field`);
+
+    const zipEntry = zip.file(filename);
+    if (!zipEntry) throw new Error(`"${filename}" listed in manifest but not in ZIP`);
+
+    const data = new Uint8Array(await zipEntry.async('arraybuffer'));
+    const val  = validateBin(data);
+    const sha  = new Uint8Array(await crypto.subtle.digest('SHA-256', data));
+
+    // image_index can be string ("0") or number (0) depending on NCS version
+    const imageIndex = parseInt(entry.image_index ?? entry.image ?? i, 10);
+    const imgType    = (entry.type || 'application').toLowerCase();
+
+    images.push({
+      imageIndex,
+      data, sha, filename,
+      version: entry.version_MCUBOOT || entry.version || val.ver,
+      type:    imgType,
+      board:   entry.board || '',
+      soc:     entry.soc   || '',
+      size:    entry.size  || data.length,
+      valid:   val.ok,
+      valMsg:  val.msg,
+    });
+
+    log(`  img${imageIndex} (${imgType}): ${filename} ${fmtB(data.length)} — ${val.msg}`, val.ok?'success':'warn');
+  }
+
+  return { images, pkgType, manifest };
+}
+
+// ── File loading ──────────────────────────────────────────────────────────────
+async function handleFile(file) {
+  if (!file) return;
+  const ext = file.name.split('.').pop().toLowerCase();
+  try {
+    let images, pkgType;
+
+    if (ext === 'zip') {
+      log(`Parsing ZIP: ${file.name}…`, 'info');
+      const r = await parseZip(file);
+      images  = r.images;
+      pkgType = r.pkgType;
+
+      const totalBytes = images.reduce((a,i)=>a+i.data.length, 0);
+      $('pkgName').textContent = file.name + (r.manifest.name ? ` · ${r.manifest.name}` : '');
+      $('pkgName').className   = `pkg-name ${pkgType===PKG_MCUBOOT?'mcuboot-pkg-lbl':'app-pkg'}`;
+      $('pkgMeta').textContent = `format-version ${r.manifest['format-version']??0} · ${images.length} image(s) · ${fmtB(totalBytes)}`;
+
+    } else if (ext === 'bin' || ext === 'img') {
+      log(`Loading raw binary: ${file.name}…`, 'info');
+      const data = new Uint8Array(await file.arrayBuffer());
+      const val  = validateBin(data);
+      const sha  = new Uint8Array(await crypto.subtle.digest('SHA-256', data));
+      log(val.msg, val.ok?'success':'warn');
+      images  = [{ imageIndex:0, data, sha, filename:file.name, version:val.ver,
+                   type:'application', board:'', soc:'', size:data.length, valid:val.ok, valMsg:val.msg }];
+      pkgType = PKG_APPLICATION;
+      $('pkgName').textContent = `${file.name} (raw binary)`;
+      $('pkgName').className   = 'pkg-name app-pkg';
+      $('pkgMeta').textContent = `Single image · ${fmtB(file.size)} · image 0`;
+
+    } else {
+      toast('Unsupported file. Use .zip or .bin', 'w'); return;
+    }
+
+    S.pkgImages = images;
+    S.pkgType   = pkgType;
+    S.pkgName   = file.name;
+
+    renderPkgImages(images, pkgType);
+    $('pkgPanel').className  = `pkg-panel${pkgType===PKG_MCUBOOT?' mcuboot-pkg':''}`;
+    $('pkgPanel').classList.remove('hidden');
+    $('dz').style.display    = 'none';
+    $('s1').className        = 'sn done';
+
+    // Show/hide MCUboot-specific warnings and lock mode
+    applyPackageTypeUI(pkgType);
+
+    renderMultiProgress(images);
+    log(`Package ready: ${images.length} image(s), type=${pkgType}`, 'success');
+    toast(`Loaded: ${images.length} image(s)`, 's');
+
+  } catch(e) {
+    log('Failed to load: ' + e.message, 'error');
+    toast('Load failed: ' + e.message, 'e');
+    return;
+  }
+  updStartBtn();
+}
+
+function applyPackageTypeUI(pkgType) {
+  const isMcuboot = pkgType === PKG_MCUBOOT;
+
+  // MCUboot warning block under the file card
+  $('mcubootWarning').classList.toggle('hidden', !isMcuboot);
+
+  // Lock upgrade mode to confirm_only for MCUboot
+  const modeSelect = $('upgradeMode');
+  if (isMcuboot) {
+    modeSelect.value    = 'confirm_only';
+    modeSelect.disabled = true;
+    $('modeLockedBanner').classList.remove('hidden');
+    $('dfuSubtitle').textContent = '⚠ MCUboot bootloader upgrade — Confirm Only — no revert possible';
+    $('progFill').classList.add('mcuboot-fill');
+    $('startBtn').className = 'btn btn-warn';
+    $('startBtn').textContent = '⚠ Start MCUboot DFU';
+  } else {
+    modeSelect.disabled = false;
+    if (modeSelect.value === 'confirm_only' && modeSelect.getAttribute('data-was-locked')) {
+      modeSelect.value = 'test_and_confirm';
+    }
+    $('modeLockedBanner').classList.add('hidden');
+    $('dfuSubtitle').textContent = 'Upload all images from package, then test/confirm/reset';
+    $('progFill').classList.remove('mcuboot-fill');
+    $('startBtn').className = 'btn btn-s';
+    $('startBtn').textContent = '▶ Start DFU';
+  }
+}
+
+function renderPkgImages(images, pkgType) {
+  const c = $('pkgImages'); c.innerHTML = '';
+  images.forEach(img => {
+    const isMcuboot = img.type === 'mcuboot';
+    const row = document.createElement('div');
+    row.className = `pkg-img-row${isMcuboot?' mcuboot-row':''}`;
+    row.innerHTML = `
+      <div>
+        <div class="pkg-img-lbl">${img.type} · Image ${img.imageIndex}</div>
+        <div class="pkg-img-val">${img.filename}</div>
+        <div class="pkg-img-sub">${img.valMsg}</div>
+        ${img.board ? `<div class="pkg-img-sub" style="margin-top:2px">Board: ${img.board}${img.soc?' · SoC: '+img.soc:''}</div>` : ''}
+      </div>
+      <div class="tags">
+        ${isMcuboot
+          ? '<span class="tag amber">bootloader</span>'
+          : `<span class="tag ${img.imageIndex===0?'green':'purple'}">img-${img.imageIndex} ${img.imageIndex===0?'app core':'net core'}</span>`}
+        <span class="tag blue">${fmtB(img.size)}</span>
+        ${img.valid ? '<span class="tag green">✓ valid</span>' : '<span class="tag red">⚠ header?</span>'}
+      </div>`;
+    c.appendChild(row);
+  });
+}
+
+function renderMultiProgress(images) {
+  const mp = $('multiProg'); mp.innerHTML = '';
+  if (images.length <= 1) { mp.classList.add('hidden'); return; }
+  mp.classList.remove('hidden');
+  images.forEach(img => {
+    const row = document.createElement('div'); row.className = 'mp-row';
+    row.innerHTML = `
+      <div class="mp-lbl">
+        <span class="mp-name">Image ${img.imageIndex} · ${img.filename}</span>
+        <span class="mp-pct" id="mpPct${img.imageIndex}">0%</span>
+      </div>
+      <div class="mp-bar"><div class="mp-fill" id="mpFill${img.imageIndex}" style="width:0%"></div></div>`;
+    mp.appendChild(row);
+  });
+}
+
+function updMp(idx, pct) {
+  const f=$(`mpFill${idx}`),p=$(`mpPct${idx}`);
+  if(f)f.style.width=Math.min(100,pct)+'%';
+  if(p)p.textContent=Math.round(pct)+'%';
+}
+
+function clearFile() {
+  S.pkgImages=[]; S.pkgType=PKG_APPLICATION; S.pkgName='';
+  $('pkgPanel').classList.add('hidden');
+  $('mcubootWarning').classList.add('hidden');
+  $('modeLockedBanner').classList.add('hidden');
+  $('dz').style.display='';
+  $('fileIn').value='';
+  $('s1').className='sn cur';
+  $('multiProg').classList.add('hidden');
+  $('upgradeMode').disabled=false;
+  $('startBtn').className='btn btn-s';
+  $('startBtn').textContent='▶ Start DFU';
+  $('dfuSubtitle').textContent='Upload all images from package, then test/confirm/reset';
+  $('progFill').classList.remove('mcuboot-fill');
+  updStartBtn();
+}
+
+// ── Notification / SMP ────────────────────────────────────────────────────────
+function onNotif(evt) {
+  const d=new Uint8Array(evt.target.value.buffer);
+  if(!S.nBuf){
+    if(d.length<4)return;
+    const plen=((d[2]<<8)|d[3]),tot=8+plen;
+    if(d.length>=tot){deliver(d.subarray(0,tot));return;}
+    S.nBuf=new Uint8Array(tot);S.nBuf.set(d);S.nFilled=d.length;S.nExpect=tot;
+  }else{
+    const need=S.nExpect-S.nFilled,chunk=d.subarray(0,need);
+    S.nBuf.set(chunk,S.nFilled);S.nFilled+=chunk.length;
+    if(S.nFilled>=S.nExpect){deliver(S.nBuf);S.nBuf=null;}
+  }
+}
+function deliver(d){clearTimeout(S.timer);const f=parseFrame(d);if(S.res){const r=S.res;S.res=S.rej=null;r(f);}}
+function waitResp(ms=10000){return new Promise((res,rej)=>{S.nBuf=null;S.res=res;S.rej=rej;S.timer=setTimeout(()=>{S.res=S.rej=null;rej(new Error('SMP timeout'));},ms);});}
+async function rpc(frame,ms=10000){const p=waitResp(ms);await S.char.writeValueWithResponse(frame);return p;}
+
+// ── BLE ────────────────────────────────────────────────────────────────────────
+async function connectDevice(){
+  try{
+    log('Scanning…','info');setSt('Scanning…');
+    S.device=await navigator.bluetooth.requestDevice({filters:[{services:[SMP_SVC]}],optionalServices:[SMP_SVC]});
+    log(`Found: ${S.device.name||'(unnamed)'}`, 'success');
+    S.device.addEventListener('gattserverdisconnected',onDisc);
+    S.server=await S.device.gatt.connect();
+    const svc=await S.server.getPrimaryService(SMP_SVC);
+    S.char=await svc.getCharacteristic(SMP_CHAR);
+    await S.char.startNotifications();
+    S.char.addEventListener('characteristicvaluechanged',onNotif);
+    $('devName').textContent=S.device.name||'(unnamed)';
+    $('smpSt').textContent='✓ Ready';
+    $('devChunk').textContent=$('chunkSz').value+' B';
+    $('devGrid').classList.remove('hidden');
+    $('connectBtn').classList.add('hidden');
+    $('discBtn').classList.remove('hidden');
+    $('refImgBtn').classList.remove('hidden');
+    $('s2').className='sn done';
+    setSt(S.device.name||'Connected',true);
+    log('SMP ready','success');toast('Connected!','s');
+    await refreshImages(); updStartBtn();
+  }catch(e){
+    if(e.name!=='NotFoundError'){log('Connect error: '+e.message,'error');toast(e.message,'e');}
+    else log('Scan cancelled','warn');
+    setSt('Disconnected');
+  }
+}
+function onDisc(){
+  log('Disconnected','warn');setSt('Disconnected');S.char=S.server=null;
+  $('connectBtn').classList.remove('hidden');$('discBtn').classList.add('hidden');$('refImgBtn').classList.add('hidden');
+  $('devGrid').classList.add('hidden');$('imgList').classList.add('hidden');$('s2').className='sn';
+  updStartBtn();
+  if(S.running){S.cancelled=true;if(S.rej)S.rej(new Error('BLE disconnected'));}
+}
+async function disconnectDevice(){if(S.device?.gatt.connected)S.device.gatt.disconnect();}
+
+async function refreshImages(){
+  try{
+    log('Reading device image state…','info');
+    const resp=await rpc(mkFrame(OP_RD,GRP_IMG,IMG_STATE,{}),6000);
+    if(getRC(resp.body)!==0)throw new Error('rc='+getRC(resp.body));
+    S.deviceImages=resp.body.images||[];
+    $('devSlots').textContent=S.deviceImages.length?S.deviceImages.length+' slot(s)':'N/A';
+    renderDevImages(S.deviceImages);
+    S.deviceImages.forEach(img=>{
+      const fl=[img.active&&'active',img.pending&&'pending',img.confirmed&&'confirmed',img.permanent&&'permanent'].filter(Boolean).join(' ');
+      log(`  Slot${img.slot??'?'} img${img.image??0} v${img.version||'?'} [${fl||'—'}]`,'data');
+    });
+  }catch(e){$('devSlots').textContent='N/A';log('Image state unavailable: '+e.message,'warn');}
+}
+
+function renderDevImages(imgs){
+  const list=$('imgList');list.innerHTML='';
+  if(!imgs.length){list.classList.add('hidden');return;}
+  list.classList.remove('hidden');
+  imgs.forEach(img=>{
+    const row=document.createElement('div');row.className='img-row';
+    const badges=[img.active?'<span class="tag green">active</span>':'',img.pending?'<span class="tag blue">pending</span>':'',img.confirmed?'<span class="tag amber">confirmed</span>':'',img.permanent?'<span class="tag purple">permanent</span>':''].join('');
+    const hash=img.hash?toHex(new Uint8Array(img.hash)).substring(0,12)+'…':'—';
+    row.innerHTML=`<div><div class="img-row-title">Slot ${img.slot??'?'} — Image ${img.image??0}</div><div class="img-row-sub">v${img.version||'?'} · ${hash}</div></div><div style="display:flex;gap:6px;flex-wrap:wrap">${badges}</div>`;
+    list.appendChild(row);
+  });
+}
+
+async function eraseSlot(imgNum){
+  log(`Erasing slot img${imgNum}…`,'info');
+  const resp=await rpc(mkFrame(OP_WR,GRP_IMG,IMG_ERASE,imgNum>0?{image:imgNum}:{}),45000);
+  if(getRC(resp.body)!==0)throw new Error('Erase rc='+getRC(resp.body));
+  log('Erased','success');
+}
+
+async function uploadImage(img,chunkSz,totalImgs,imgIdx){
+  const data=img.data,total=data.length,imgNum=img.imageIndex;
+  let off=0;S.startTime=Date.now();
+  const FIRST_OH=70,NEXT_OH=20;
+  log(`Uploading img${imgNum} (${img.filename}): ${fmtB(total)}`,'info');
+  $('stImg').textContent=`${imgNum} · ${img.filename}`;
+
+  while(off<total){
+    if(S.cancelled)throw new Error('Cancelled');
+    while(S.paused){await sleep(200);if(S.cancelled)throw new Error('Cancelled');}
+    const oh=off===0?FIRST_OH:NEXT_OH;
+    const end=Math.min(off+chunkSz-oh,total);
+    const pkt={data:data.subarray(off,end),off};
+    if(off===0){
+      pkt.len=total;
+      if(imgNum>0)pkt.image=imgNum;
+      if(img.sha)pkt.sha=img.sha;
+      if($('togUpgrade').classList.contains('on'))pkt.upgrade=true;
+    }
+    let resp,attempt=0;
+    while(true){
+      try{resp=await rpc(mkFrame(OP_WR,GRP_IMG,IMG_UPLOAD,pkt),15000);break;}
+      catch(e){if(++attempt>=5)throw new Error(`Upload img${imgNum} off=${off}: ${e.message}`);S.retries++;log(`Retry ${attempt}/5 off=${off}…`,'warn');await sleep(600*attempt);}
+    }
+    $('stRetry').textContent=S.retries;
+    const errRc=getRC(resp.body);
+    if(errRc!==0)throw new Error(`Upload rejected img${imgNum}: rc=${errRc}`);
+    if(typeof resp.body?.off==='number'){
+      if(resp.body.off===0&&off>0){log(`Server reset img${imgNum} session — restarting…`,'warn');off=0;S.startTime=Date.now();continue;}
+      off=resp.body.off;
+    }else{off=end;}
+    const imgPct=(off/total)*100;
+    const overallPct=((imgIdx+off/total)/totalImgs)*100;
+    setProg(overallPct,'Uploading'); updMp(imgNum,imgPct);
+    const elapsed=(Date.now()-S.startTime)/1000,bps=off/elapsed;
+    $('stSent').textContent=fmtB(off);
+    $('stSpeed').textContent=bps>1024?(bps/1024).toFixed(1)+' KB/s':Math.round(bps)+' B/s';
+    const rem=(total-off)/bps;
+    $('stEta').textContent=isFinite(rem)?(rem>60?Math.ceil(rem/60)+'m':Math.ceil(rem)+'s'):'—';
+    if(off%Math.max(chunkSz*25,5120)<chunkSz-NEXT_OH||off===total)
+      log(`↑ img${imgNum}: ${fmtB(off)}/${fmtB(total)} (${imgPct.toFixed(1)}%)`,'data');
+  }
+  updMp(imgNum,100);
+  log(`img${imgNum} upload complete`,'success');
+}
+
+async function testImg(imgNum){
+  log(`TEST img${imgNum}…`,'info');
+  const sr=await rpc(mkFrame(OP_RD,GRP_IMG,IMG_STATE,{}),6000);
+  const imgs=sr.body?.images||[];
+  const tgt=imgs.find(i=>(i.image??0)===imgNum&&i.slot===1)||imgs.find(i=>(i.image??0)===imgNum&&!i.active)||imgs.find(i=>!i.active);
+  if(!tgt)throw new Error(`No slot-1 image for img${imgNum}`);
+  if(!tgt.hash)throw new Error(`img${imgNum} has no hash`);
+  const resp=await rpc(mkFrame(OP_WR,GRP_IMG,IMG_STATE,{hash:new Uint8Array(tgt.hash),confirm:false}),8000);
+  if(getRC(resp.body)!==0)throw new Error('TEST rc='+getRC(resp.body));
+  log(`img${imgNum} set for test boot`,'success');
+}
+
+async function confirmImg(imgNum){
+  log(`CONFIRM img${imgNum}…`,'info');
+  const sr=await rpc(mkFrame(OP_RD,GRP_IMG,IMG_STATE,{}),6000);
+  const imgs=sr.body?.images||[];
+  const tgt=imgs.find(i=>(i.image??0)===imgNum&&i.active&&!i.confirmed)||imgs.find(i=>(i.image??0)===imgNum&&!i.confirmed)||imgs.find(i=>!i.confirmed);
+  if(!tgt){log(`img${imgNum} already confirmed — skipping`,'warn');return;}
+  if(!tgt.hash)throw new Error(`img${imgNum} has no hash for CONFIRM`);
+  const resp=await rpc(mkFrame(OP_WR,GRP_IMG,IMG_STATE,{hash:new Uint8Array(tgt.hash),confirm:true}),8000);
+  if(getRC(resp.body)!==0)throw new Error('CONFIRM rc='+getRC(resp.body));
+  log(`img${imgNum} confirmed permanently`,'success');
+}
+
+async function resetDev(){
+  log('Sending reset…','info');
+  try{await S.char.writeValueWithResponse(mkFrame(OP_WR,GRP_OS,OS_RESET,{}));}catch(_){}
+  log('Reset sent — rebooting…','success');
+}
+
+async function reconnect(tries=8,delayMs=2000){
+  for(let i=0;i<tries;i++){
+    await sleep(delayMs);
+    try{
+      log(`Reconnect ${i+1}/${tries}…`,'info');
+      S.server=await S.device.gatt.connect();
+      const svc=await S.server.getPrimaryService(SMP_SVC);
+      S.char=await svc.getCharacteristic(SMP_CHAR);
+      await S.char.startNotifications();
+      S.char.addEventListener('characteristicvaluechanged',onNotif);
+      log('Reconnected!','success');setSt(S.device.name||'Connected',true);return;
+    }catch(e){log(`Attempt ${i+1}: ${e.message}`,'warn');}
+  }
+  throw new Error('Reconnect failed');
+}
+
+// ── Main DFU ──────────────────────────────────────────────────────────────────
+async function startDfu(){
+  const mode    = $('upgradeMode').value;
+  const chunkSz = Math.min(480,Math.max(64,parseInt($('chunkSz').value)));
+  const delay   = parseInt($('resetDly').value);
+  const doErase = $('togErase').classList.contains('on');
+  const images  = S.pkgImages;
+  const isMcubootPkg = S.pkgType === PKG_MCUBOOT;
+
+  // Safety check for MCUboot package
+  if (isMcubootPkg && mode !== 'confirm_only') {
+    log('ERROR: MCUboot package requires Confirm Only mode','error');
+    toast('MCUboot requires Confirm Only mode','e'); return;
+  }
+
+  S.running=true;S.paused=false;S.cancelled=false;S.retries=0;
+  $('startBtn').classList.add('hidden');
+  $('pauseBtn').classList.remove('hidden');
+  $('cancelBtn').classList.remove('hidden');
+  $('successBanner').classList.remove('vis');
+  $('s4').className='sn cur';
+  resetPhases();setProg(0,'Starting…');
+
+  if (isMcubootPkg) log('════ MCUboot BOOTLOADER DFU — CONFIRM ONLY ════','warn');
+  else               log('════ Application DFU ════','info');
+
+  try{
+    // VALIDATE
+    ph('phV','phase cur'); log('── VALIDATE','info');
+    await refreshImages();
+    const toUpload=[];
+    for(const img of images){
+      let skip=false;
+      if(img.sha){
+        const ex=S.deviceImages.find(d=>(d.image??0)===img.imageIndex&&d.slot===1&&d.hash);
+        if(ex&&toHex(new Uint8Array(ex.hash))===toHex(img.sha)){
+          skip=true;log(`img${img.imageIndex}: already current — skip upload`,'success');updMp(img.imageIndex,100);
+        }
+      }
+      if(!skip)toUpload.push(img);
+    }
+    ph('phV','phase done');
+
+    // ERASE
+    if(doErase&&toUpload.length){
+      ph('phE','phase cur');log('── ERASE','info');
+      for(const img of toUpload)await eraseSlot(img.imageIndex);
+      ph('phE','phase done');
+    }else ph('phE','phase skip');
+
+    // UPLOAD
+    if(toUpload.length){
+      ph('phU','phase cur');log(`── UPLOAD (${toUpload.length} image(s))`,'info');
+      for(let i=0;i<toUpload.length;i++)await uploadImage(toUpload[i],chunkSz,toUpload.length,i);
+      ph('phU','phase done');
+    }else{ph('phU','phase skip');setProg(100,'Upload skipped');}
+
+    // TEST / CONFIRM (pre-reset)
+    if(mode==='test_and_confirm'||mode==='test_only'){
+      ph('phT','phase cur');log('── TEST','info');
+      for(const img of images)await testImg(img.imageIndex);
+      ph('phT','phase done');
+    }else if(mode==='confirm_only'){
+      ph('phT','phase skip');
+      ph('phC',`phase cur${isMcubootPkg?' warn-phase':''}`);
+      log('── CONFIRM (pre-reset)'+(isMcubootPkg?' — MCUboot, no revert possible':''),'info');
+      if(isMcubootPkg) log('⚠ Confirming MCUboot — device cannot recover if bootloader fails to boot','warn');
+      for(const img of images)await confirmImg(img.imageIndex);
+      ph('phC','phase done');
+    }else{
+      ph('phT','phase skip');ph('phC','phase skip');
+    }
+
+    // RESET
+    ph('phR','phase cur');log(`── RESET (wait ${delay}ms)`,'info');
+    await resetDev();await sleep(delay);ph('phR','phase done');
+
+    // POST-RESET CONFIRM (test_and_confirm only)
+    if(mode==='test_and_confirm'){
+      ph('phC','phase cur');log('── CONFIRM (post-reset)','info');
+      try{
+        await reconnect(8,2000);
+        for(const img of images)await confirmImg(img.imageIndex);
+        ph('phC','phase done');await refreshImages();
+      }catch(e){
+        log('Auto-confirm failed: '+e.message,'warn');
+        log('Device may self-confirm via mcumgr_img_mgmt_default_confirm()','warn');
+        ph('phC','phase skip');
+      }
+    }else if(mode!=='confirm_only') ph('phC','phase skip');
+
+    // SUCCESS
+    S.running=false;$('s4').className='sn done';
+    $('successBanner').classList.add('vis');
+    $('successSub').textContent=`${S.pkgName} · ${images.length} image(s)${isMcubootPkg?' · MCUboot updated':''} · complete.`;
+    setProg(100,'Complete');
+    $('pauseBtn').classList.add('hidden');$('cancelBtn').classList.add('hidden');
+    $('startBtn').classList.remove('hidden');
+    $('startBtn').textContent=isMcubootPkg?'⚠ DFU Again':'↺ DFU Again';
+    toast('DFU complete! ✅','s');
+    log('════ DFU COMPLETE ✓ ════','success');
+
+  }catch(e){
+    S.running=false;
+    log('DFU FAILED: '+e.message,'error');toast('DFU failed: '+e.message,'e');
+    setProg(0,'Failed');$('progPct').textContent='–';
+    $('pauseBtn').classList.add('hidden');$('cancelBtn').classList.add('hidden');
+    $('startBtn').classList.remove('hidden');$('s4').className='sn';
+  }
+}
+
+// ── Init ────────────────────────────────────────────────────────────────────────
+document.addEventListener('DOMContentLoaded',()=>{
+  if(!navigator.bluetooth){$('unsupBanner').classList.remove('hidden');$('connectBtn').disabled=true;}
+
+  $('fileIn').addEventListener('change',e=>handleFile(e.target.files[0]));
+  $('clearFileBtn').addEventListener('click',clearFile);
+  const dz=$('dz');
+  dz.addEventListener('dragover',e=>{e.preventDefault();dz.classList.add('dg')});
+  dz.addEventListener('dragleave',()=>dz.classList.remove('dg'));
+  dz.addEventListener('drop',e=>{e.preventDefault();dz.classList.remove('dg');handleFile(e.dataTransfer.files[0]);});
+
+  $('connectBtn').addEventListener('click',connectDevice);
+  $('discBtn').addEventListener('click',disconnectDevice);
+  $('refImgBtn').addEventListener('click',refreshImages);
+  $('startBtn').addEventListener('click',startDfu);
+  $('pauseBtn').addEventListener('click',()=>{S.paused=!S.paused;$('pauseBtn').textContent=S.paused?'▶ Resume':'⏸ Pause';log(S.paused?'Paused':'Resumed','warn');});
+  $('cancelBtn').addEventListener('click',()=>{S.cancelled=true;S.paused=false;$('pauseBtn').classList.add('hidden');$('cancelBtn').classList.add('hidden');if(S.rej)S.rej(new Error('Cancelled'));log('Cancelled','warn');toast('Cancelled','w');});
+
+  ['togErase','togUpgrade'].forEach(id=>$(id).addEventListener('click',()=>$(id).classList.toggle('on')));
+  $('togLog').addEventListener('click',()=>{$('togLog').classList.toggle('on');logOn=$('togLog').classList.contains('on');$('console').style.display=logOn?'':'none';});
+  $('clearLogBtn').addEventListener('click',()=>$('console').innerHTML='');
+  $('chunkSz').addEventListener('input',()=>$('devChunk').textContent=$('chunkSz').value+' B');
+
+  log('nRF Web DFU ready · MIT License','success');
+  log('Supports: dfu_application.zip · dfu_mcuboot.zip · raw .bin','data');
+  log('manifest.json format-version 0 and 1 · multi-image · nRF5340','data');
+});
+</script>
+</body>
+</html>
