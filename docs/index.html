@@ -399,6 +399,8 @@
         <span style="font-size:12px;font-family:var(--mono);color:var(--text-dim)">Console</span>
         <div class="tog on" id="togLog"></div>
         <span class="tog-lbl">Show log</span>
+        <div class="tog on" id="togScroll" style="margin-left:6px"></div>
+        <span class="tog-lbl">Auto-scroll</span>
       </div>
       <button class="btn btn-g" style="font-size:11px;padding:4px 10px" id="clearLogBtn">Clear</button>
     </div>
@@ -485,12 +487,14 @@ const S={
 // ── UI ─────────────────────────────────────────────────────────────────────────
 const $=id=>document.getElementById(id);
 let logOn=true;
+let autoScroll=true;
 function log(msg,type='info'){
   if(!logOn)return;
   const c=$('console'),t=new Date().toTimeString().slice(0,8);
   const el=document.createElement('div');el.className=`ll ${type}`;
   el.innerHTML=`<span class="lt">${t}</span><span class="lm">${esc(msg)}</span>`;
-  c.appendChild(el);c.scrollTop=c.scrollHeight;
+  c.appendChild(el);
+  if(autoScroll) c.scrollTop=c.scrollHeight;
 }
 function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
 function toast(m,t='i'){const el=$('toast');el.textContent=m;el.className=`show t${t}`;clearTimeout(el._t);el._t=setTimeout(()=>el.className='',3500);}
@@ -1003,42 +1007,59 @@ function findPendingImage(imgs, imgNum, slotSecondary) {
   );
 }
 
-async function testImg(imgNum, slotSecondary){
+// pkgImg = the image descriptor from our ZIP package (has .sha pre-computed)
+async function testImg(imgNum, slotSecondary, pkgImg){
   log(`TEST img${imgNum}… (secondary slot=${slotSecondary??'unknown'})`,'info');
-  // Small delay to let device finalise write before querying state
   await sleep(300);
-  const sr=await rpc(mkFrame(OP_RD,GRP_IMG,IMG_STATE,{}),8000);
-  const imgs=sr.body?.images||[];
+
+  // Strategy 1: query device image state and use hash from there
+  const sr  = await rpc(mkFrame(OP_RD,GRP_IMG,IMG_STATE,{}),8000);
+  const imgs = sr.body?.images||[];
   logImageState(imgs, 'pre-TEST');
 
-  if(!imgs.length) throw new Error('Device returned no images in state response');
+  // Try to find the image in device state
+  const tgt = imgs.length ? findPendingImage(imgs, imgNum, slotSecondary) : null;
 
-  const tgt = findPendingImage(imgs, imgNum, slotSecondary);
-  if(!tgt) throw new Error(`No candidate image found for img${imgNum} — check device image state in console`);
-
-  if(!tgt.hash){
-    // No hash — some minimal MCUboot builds omit it; try sending confirm without hash
-    // by using the image/slot fields instead (not standard, log warning)
-    log(`img${imgNum}: no hash in image state — attempting TEST without hash (non-standard)`, 'warn');
-    // Fall through: if device requires hash it will return rc!=0 and we handle it below
-  }
-
-  // If already pending, no need to re-send TEST
-  if(tgt.pending){
-    log(`img${imgNum} already marked pending — skipping TEST command`,'success');
+  // If already pending, nothing to do
+  if(tgt?.pending){
+    log(`img${imgNum} already marked pending — skipping TEST`,'success');
     return;
   }
 
-  const payload = { confirm: false };
-  if(tgt.hash) payload.hash = new Uint8Array(tgt.hash);
+  // Build the TEST payload
+  // Priority for hash:
+  //   1. Hash from device image state (most reliable)
+  //   2. SHA-256 we computed from the .bin file (works when device state is empty)
+  let hashBytes = null;
+  if(tgt?.hash){
+    hashBytes = new Uint8Array(tgt.hash);
+    log(`img${imgNum}: using hash from device image state`,'data');
+  } else if(pkgImg?.sha){
+    hashBytes = pkgImg.sha;
+    log(`img${imgNum}: device image state empty — using SHA-256 from package file`,'warn');
+  }
 
-  const resp=await rpc(mkFrame(OP_WR,GRP_IMG,IMG_STATE,payload),8000);
-  const rc=getRC(resp.body);
-  if(rc!==0) throw new Error(`TEST command rejected by device: rc=${rc}. Check firmware supports test/confirm mode (not DirectXIP without revert).`);
+  // confirm:false with hash = mark that image for test boot
+  // If we have no hash at all the spec allows omitting it only for confirm:true (active image)
+  // For test we must have it — throw a clear error
+  if(!hashBytes){
+    throw new Error(
+      `img${imgNum}: cannot TEST — no hash available from device state or package. ` +
+      `Try "None" upgrade mode (Upload + Reset only) if your bootloader does not support test/confirm.`
+    );
+  }
+
+  const resp = await rpc(mkFrame(OP_WR,GRP_IMG,IMG_STATE,{hash:hashBytes, confirm:false}),8000);
+  const rc   = getRC(resp.body);
+  if(rc!==0) throw new Error(
+    `TEST rejected by device: rc=${rc}. ` +
+    `This may mean your bootloader uses DirectXIP or overwrite-only mode. ` +
+    `Try switching upgrade mode to "None" or "Confirm Only".`
+  );
   log(`img${imgNum} set for test boot`,'success');
 }
 
-async function confirmImg(imgNum, slotPrimary){
+async function confirmImg(imgNum, slotPrimary, pkgImg){
   log(`CONFIRM img${imgNum}… (primary slot=${slotPrimary??'unknown'})`,'info');
   await sleep(300);
   const sr=await rpc(mkFrame(OP_RD,GRP_IMG,IMG_STATE,{}),8000);
@@ -1060,17 +1081,23 @@ async function confirmImg(imgNum, slotPrimary){
     imgs.find(i  => i.active && !i.confirmed)   ||
     imgs.find(i  => !i.confirmed);
 
-  if(!tgt){
+  if(!tgt && !pkgImg?.sha){
     log(`img${imgNum}: already confirmed or nothing to confirm — skipping`,'warn');
     return;
   }
 
-  if(!tgt.hash){
-    log(`img${imgNum}: no hash for CONFIRM — skipping (device may auto-confirm)`,'warn');
-    return;
+  // Hash priority: device state > local package SHA
+  let hashBytes = tgt?.hash ? new Uint8Array(tgt.hash) : pkgImg?.sha || null;
+
+  if(!hashBytes){
+    // spec: for confirm:true hash is optional — device confirms currently running image
+    log(`img${imgNum}: no hash — sending CONFIRM for currently running image`,'warn');
   }
 
-  const resp=await rpc(mkFrame(OP_WR,GRP_IMG,IMG_STATE,{hash:new Uint8Array(tgt.hash),confirm:true}),8000);
+  const payload = { confirm: true };
+  if(hashBytes) payload.hash = hashBytes;
+
+  const resp=await rpc(mkFrame(OP_WR,GRP_IMG,IMG_STATE,payload),8000);
   const rc=getRC(resp.body);
   if(rc!==0) throw new Error(`CONFIRM rejected: rc=${rc}`);
   log(`img${imgNum} confirmed permanently`,'success');
@@ -1158,14 +1185,14 @@ async function startDfu(){
     // TEST / CONFIRM (pre-reset)
     if(mode==='test_and_confirm'||mode==='test_only'){
       ph('phT','phase cur');log('── TEST','info');
-      for(const img of images)await testImg(img.imageIndex, img.slotSecondary);
+      for(const img of images)await testImg(img.imageIndex, img.slotSecondary, img);
       ph('phT','phase done');
     }else if(mode==='confirm_only'){
       ph('phT','phase skip');
       ph('phC',`phase cur${isMcubootPkg?' warn-phase':''}`);
       log('── CONFIRM (pre-reset)'+(isMcubootPkg?' — MCUboot, no revert possible':''),'info');
       if(isMcubootPkg) log('⚠ Confirming MCUboot — device cannot recover if bootloader fails to boot','warn');
-      for(const img of images)await confirmImg(img.imageIndex, img.slotPrimary);
+      for(const img of images)await confirmImg(img.imageIndex, img.slotPrimary, img);
       ph('phC','phase done');
     }else{
       ph('phT','phase skip');ph('phC','phase skip');
@@ -1180,7 +1207,7 @@ async function startDfu(){
       ph('phC','phase cur');log('── CONFIRM (post-reset)','info');
       try{
         await reconnect(8,2000);
-        for(const img of images)await confirmImg(img.imageIndex, img.slotPrimary);
+        for(const img of images)await confirmImg(img.imageIndex, img.slotPrimary, img);
         ph('phC','phase done');await refreshImages();
       }catch(e){
         log('Auto-confirm failed: '+e.message,'warn');
@@ -1245,6 +1272,22 @@ document.addEventListener('DOMContentLoaded',()=>{
 
   ['togErase','togUpgrade'].forEach(id=>$(id).addEventListener('click',()=>$(id).classList.toggle('on')));
   $('togLog').addEventListener('click',()=>{$('togLog').classList.toggle('on');logOn=$('togLog').classList.contains('on');$('console').style.display=logOn?'':'none';});
+  $('togScroll').addEventListener('click',()=>{
+    $('togScroll').classList.toggle('on');
+    autoScroll=$('togScroll').classList.contains('on');
+    // If re-enabling, jump to bottom immediately
+    if(autoScroll) $('console').scrollTop=$('console').scrollHeight;
+  });
+  // Allow manual scroll to temporarily pause autoscroll
+  $('console').addEventListener('scroll', () => {
+    const c=$('console');
+    const atBottom = c.scrollHeight - c.scrollTop - c.clientHeight < 32;
+    if(!atBottom && autoScroll){
+      // User scrolled up manually — pause autoscroll and reflect in toggle
+      autoScroll=false;
+      $('togScroll').classList.remove('on');
+    }
+  });
   $('clearLogBtn').addEventListener('click',()=>$('console').innerHTML='');
   $('chunkSz').addEventListener('input',()=>$('devChunk').textContent=$('chunkSz').value+' B');
 
