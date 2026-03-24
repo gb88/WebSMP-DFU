@@ -187,6 +187,10 @@
   #toast.ts{border-color:var(--ng);color:var(--ng)}#toast.te{border-color:var(--nr);color:var(--nr)}#toast.tw{border-color:var(--na);color:var(--na)}
   .hidden{display:none!important}
   .progress-section{margin-top:20px}
+  .scan-strat-btn{font-family:var(--mono);font-size:11px;padding:6px 14px;border-radius:8px;border:1px solid var(--border);background:var(--surface2);color:var(--text-dim);cursor:pointer;transition:all .2s}
+  .scan-strat-btn:hover{border-color:var(--border-b);color:var(--text)}
+  .scan-strat-btn.active{border-color:var(--nb);color:var(--nb);background:rgba(0,169,206,.1)}
+  .scan-hint{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:4px;min-height:22px}
 </style>
 </head>
 <body>
@@ -269,7 +273,45 @@
         <div class="card-sub">Connect to device running MCUboot + SMP (Zephyr / nRF Connect SDK)</div>
       </div>
     </div>
-    <div class="abar" style="margin-top:0">
+
+    <!-- Scan strategy -->
+    <div id="scanOptions">
+      <div style="font-family:var(--mono);font-size:11px;color:var(--text-dim);margin-bottom:10px">
+        Scan strategy — choose based on how your device advertises:
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px" id="scanStrategyBtns">
+        <button class="scan-strat-btn active" data-strat="smp">SMP Service UUID</button>
+        <button class="scan-strat-btn" data-strat="name">Device Name</button>
+        <button class="scan-strat-btn" data-strat="nordic">Nordic Manufacturer ID</button>
+        <button class="scan-strat-btn" data-strat="all">Show All Devices</button>
+      </div>
+
+      <!-- Name filter (shown for "name" strategy) -->
+      <div class="hidden" id="nameFilterRow" style="margin-bottom:14px">
+        <label class="s-lbl">Device name prefix (case-sensitive)</label>
+        <input class="s-input" type="text" id="nameFilter" placeholder="e.g. MyDevice, DFU, Zephyr" style="max-width:320px">
+      </div>
+
+      <!-- Strategy hints -->
+      <div class="scan-hint" id="hintSmp">
+        <span class="tag green">Recommended if device advertises SMP</span>
+        <span style="font-family:var(--mono);font-size:11px;color:var(--text-dim);margin-left:8px">Filters by SMP service UUID — fastest and most reliable when supported</span>
+      </div>
+      <div class="scan-hint hidden" id="hintName">
+        <span class="tag blue">Use when you know the device name</span>
+        <span style="font-family:var(--mono);font-size:11px;color:var(--text-dim);margin-left:8px">Filters by name prefix — device does not need to advertise SMP service</span>
+      </div>
+      <div class="scan-hint hidden" id="hintNordic">
+        <span class="tag amber">Nordic devices only</span>
+        <span style="font-family:var(--mono);font-size:11px;color:var(--text-dim);margin-left:8px">Filters by Nordic Semiconductor manufacturer ID (0x0059) in advertisement — works without SMP advertising</span>
+      </div>
+      <div class="scan-hint hidden" id="hintAll">
+        <span class="tag red">Shows every nearby BLE device</span>
+        <span style="font-family:var(--mono);font-size:11px;color:var(--text-dim);margin-left:8px">No filter — use as last resort. SMP service will still be requested as optional after connecting</span>
+      </div>
+    </div>
+
+    <div class="abar" style="margin-top:14px">
       <button class="btn btn-p" id="connectBtn">⚡ Scan &amp; Connect</button>
       <button class="btn btn-d hidden" id="discBtn">Disconnect</button>
       <button class="btn btn-g hidden" id="refImgBtn">↻ Refresh Images</button>
@@ -722,31 +764,107 @@ function waitResp(ms=10000){return new Promise((res,rej)=>{S.nBuf=null;S.res=res
 async function rpc(frame,ms=10000){const p=waitResp(ms);await S.char.writeValueWithResponse(frame);return p;}
 
 // ── BLE ────────────────────────────────────────────────────────────────────────
+// Nordic Semiconductor company identifier in BLE manufacturer data
+const NORDIC_COMPANY_ID = 0x0059;
+
+// Build requestDevice options based on selected scan strategy
+function buildScanOptions(strategy, namePrefix) {
+  // SMP service is always requested as optional so we can use it after connecting
+  // regardless of whether the device advertised it
+  const optionalServices = [SMP_SVC];
+
+  switch (strategy) {
+    case 'smp':
+      // Filter by SMP service UUID — only works if device advertises it
+      log('Scan strategy: SMP service UUID filter', 'info');
+      return { filters: [{ services: [SMP_SVC] }], optionalServices };
+
+    case 'name':
+      // Filter by device name prefix — works even if SMP service not advertised
+      if (!namePrefix.trim()) throw new Error('Enter a device name prefix');
+      log(`Scan strategy: name prefix "${namePrefix.trim()}"`, 'info');
+      return { filters: [{ namePrefix: namePrefix.trim() }], optionalServices };
+
+    case 'nordic':
+      // Filter by Nordic Semiconductor manufacturer ID (0x0059)
+      // Most nRF devices include this in advertisement even in app mode
+      log('Scan strategy: Nordic manufacturer ID (0x0059)', 'info');
+      return {
+        filters: [{
+          manufacturerData: [{ companyIdentifier: NORDIC_COMPANY_ID }]
+        }],
+        optionalServices
+      };
+
+    case 'all':
+    default:
+      // Accept all devices — user picks from full list
+      // Required: acceptAllDevices cannot be combined with filters
+      log('Scan strategy: all devices (no filter)', 'warn');
+      log('⚠ After connecting, SMP service will be probed — not all devices will work', 'warn');
+      return { acceptAllDevices: true, optionalServices };
+  }
+}
+
 async function connectDevice(){
+  const strategy  = document.querySelector('.scan-strat-btn.active')?.dataset.strat || 'smp';
+  const nameFilter = $('nameFilter')?.value || '';
+
+  let scanOpts;
+  try {
+    scanOpts = buildScanOptions(strategy, nameFilter);
+  } catch(e) {
+    toast(e.message, 'w'); log(e.message, 'warn'); return;
+  }
+
   try{
-    log('Scanning…','info');setSt('Scanning…');
-    S.device=await navigator.bluetooth.requestDevice({filters:[{services:[SMP_SVC]}],optionalServices:[SMP_SVC]});
-    log(`Found: ${S.device.name||'(unnamed)'}`, 'success');
-    S.device.addEventListener('gattserverdisconnected',onDisc);
-    S.server=await S.device.gatt.connect();
-    const svc=await S.server.getPrimaryService(SMP_SVC);
-    S.char=await svc.getCharacteristic(SMP_CHAR);
+    log('Opening BLE device picker…','info'); setSt('Scanning…');
+    S.device = await navigator.bluetooth.requestDevice(scanOpts);
+    log(`Selected: "${S.device.name||'(unnamed)'}"`, 'success');
+    S.device.addEventListener('gattserverdisconnected', onDisc);
+
+    log('Connecting to GATT server…', 'info');
+    S.server = await S.device.gatt.connect();
+    log('GATT connected', 'success');
+
+    // Try to get SMP service — it may exist even if not advertised
+    let svc;
+    try {
+      svc = await S.server.getPrimaryService(SMP_SVC);
+    } catch(e) {
+      // Service not found — give a clear error
+      await S.device.gatt.disconnect();
+      throw new Error(
+        `SMP service not found on "${S.device.name||'device'}". ` +
+        `Make sure the device firmware has CONFIG_MCUMGR_TRANSPORT_BT=y and is in DFU-ready state.`
+      );
+    }
+
+    S.char = await svc.getCharacteristic(SMP_CHAR);
     await S.char.startNotifications();
-    S.char.addEventListener('characteristicvaluechanged',onNotif);
-    $('devName').textContent=S.device.name||'(unnamed)';
-    $('smpSt').textContent='✓ Ready';
-    $('devChunk').textContent=$('chunkSz').value+' B';
+    S.char.addEventListener('characteristicvaluechanged', onNotif);
+    log('SMP service and notifications ready', 'success');
+
+    $('devName').textContent = S.device.name||'(unnamed)';
+    $('smpSt').textContent   = '✓ Ready';
+    $('devChunk').textContent = $('chunkSz').value+' B';
     $('devGrid').classList.remove('hidden');
+    $('scanOptions').classList.add('hidden');
     $('connectBtn').classList.add('hidden');
     $('discBtn').classList.remove('hidden');
     $('refImgBtn').classList.remove('hidden');
-    $('s2').className='sn done';
-    setSt(S.device.name||'Connected',true);
-    log('SMP ready','success');toast('Connected!','s');
+    $('s2').className = 'sn done';
+    setSt(S.device.name||'Connected', true);
+    toast('Connected!', 's');
     await refreshImages(); updStartBtn();
+
   }catch(e){
-    if(e.name!=='NotFoundError'){log('Connect error: '+e.message,'error');toast(e.message,'e');}
-    else log('Scan cancelled','warn');
+    if(e.name==='NotFoundError'||e.name==='NotAllowedError'){
+      log('Scan cancelled or denied','warn');
+    } else {
+      log('Connect error: '+e.message,'error');
+      toast(e.message,'e');
+    }
     setSt('Disconnected');
   }
 }
@@ -754,6 +872,7 @@ function onDisc(){
   log('Disconnected','warn');setSt('Disconnected');S.char=S.server=null;
   $('connectBtn').classList.remove('hidden');$('discBtn').classList.add('hidden');$('refImgBtn').classList.add('hidden');
   $('devGrid').classList.add('hidden');$('imgList').classList.add('hidden');$('s2').className='sn';
+  $('scanOptions').classList.remove('hidden');
   updStartBtn();
   if(S.running){S.cancelled=true;if(S.rej)S.rej(new Error('BLE disconnected'));}
 }
@@ -1007,6 +1126,22 @@ document.addEventListener('DOMContentLoaded',()=>{
   dz.addEventListener('dragover',e=>{e.preventDefault();dz.classList.add('dg')});
   dz.addEventListener('dragleave',()=>dz.classList.remove('dg'));
   dz.addEventListener('drop',e=>{e.preventDefault();dz.classList.remove('dg');handleFile(e.dataTransfer.files[0]);});
+
+  // Scan strategy toggle buttons
+  document.querySelectorAll('.scan-strat-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.scan-strat-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      const strat = btn.dataset.strat;
+      // Show/hide name input
+      $('nameFilterRow').classList.toggle('hidden', strat !== 'name');
+      // Show/hide hints
+      ['smp','name','nordic','all'].forEach(s => {
+        const h = $('hint'+s.charAt(0).toUpperCase()+s.slice(1));
+        if(h) h.classList.toggle('hidden', s !== strat);
+      });
+    });
+  });
 
   $('connectBtn').addEventListener('click',connectDevice);
   $('discBtn').addEventListener('click',disconnectDevice);
