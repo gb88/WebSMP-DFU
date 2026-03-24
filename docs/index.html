@@ -1,22 +1,4 @@
 <!DOCTYPE html>
-<!--
-  nRF Web DFU
-  -----------
-  Web Bluetooth DFU tool for Nordic nRF devices using McuManager / SMP protocol.
-
-  License: MIT
-  Copyright (c) 2024 — Your Name / Your Company
-
-  Protocol spec:
-    https://docs.zephyrproject.org/latest/services/device_mgmt/smp_protocol.html
-    https://docs.zephyrproject.org/latest/services/device_mgmt/smp_groups/smp_group_1.html
-
-  Inspired by (Apache 2.0):
-    https://github.com/NordicSemiconductor/Android-nRF-Connect-Device-Manager
-
-  Dependencies:
-    JSZip 3.10.1 — MIT license — https://stuk.github.io/jszip/
--->
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -429,7 +411,6 @@
 <script>
 // =============================================================================
 // nRF Web DFU — McuManager SMP over Web Bluetooth
-// MIT License — see file header
 // =============================================================================
 
 const SMP_SVC  = '8d53dc1d-1db7-4cd3-868b-8a527460aa84';
@@ -957,29 +938,118 @@ async function uploadImage(img,chunkSz,totalImgs,imgIdx){
   }
   updMp(imgNum,100);
   log(`img${imgNum} upload complete`,'success');
+  // Log image state immediately after upload so user can see what device reports
+  try {
+    const sr = await rpc(mkFrame(OP_RD,GRP_IMG,IMG_STATE,{}),6000);
+    logImageState(sr.body?.images||[], `post-upload img${imgNum}`);
+  } catch(e) { log('Could not read state after upload: '+e.message,'warn'); }
+}
+
+// Log the full image state for debugging
+function logImageState(imgs, context) {
+  log(`Image state (${context}): ${imgs.length} image(s)`, 'data');
+  imgs.forEach((img, i) => {
+    const flags = [
+      img.active    != null ? `active=${img.active}`       : '',
+      img.pending   != null ? `pending=${img.pending}`     : '',
+      img.confirmed != null ? `confirmed=${img.confirmed}` : '',
+      img.permanent != null ? `permanent=${img.permanent}` : '',
+      img.slot      != null ? `slot=${img.slot}`           : 'slot=?',
+      img.image     != null ? `image=${img.image}`         : 'image=0',
+    ].filter(Boolean).join(' ');
+    log(`  [${i}] v${img.version||'?'} ${flags} hash=${img.hash?toHex(new Uint8Array(img.hash)).slice(0,12)+'…':'none'}`, 'data');
+  });
+}
+
+// Find the best candidate image for TEST (the newly uploaded one, not yet active)
+// Priority:
+//   1. Same image number, slot=1, not active
+//   2. Same image number, not active (slot field may be missing on some firmware)
+//   3. Any image that is pending=false, not active (just uploaded)
+//   4. Any image that is not active
+//   5. Any image at all (DirectXIP / single-slot — no swap needed, skip TEST)
+function findPendingImage(imgs, imgNum) {
+  // Normalise: image field can be missing (defaults to 0)
+  const forImg = imgs.filter(i => (i.image ?? 0) === imgNum);
+  const all    = imgs;
+
+  return (
+    forImg.find(i => i.slot === 1 && !i.active)           ||  // ideal: slot 1, not active
+    forImg.find(i => i.slot === 1)                         ||  // slot 1, maybe active (DirectXIP)
+    forImg.find(i => !i.active && !i.confirmed)            ||  // not active, not confirmed
+    forImg.find(i => !i.active)                            ||  // not active
+    all.find(i => i.slot === 1 && !i.active)               ||  // any slot-1
+    all.find(i => !i.active)                               ||  // any non-active
+    forImg[forImg.length - 1]                              ||  // last image for this imgNum
+    all[all.length - 1]                                        // absolute fallback
+  );
 }
 
 async function testImg(imgNum){
   log(`TEST img${imgNum}…`,'info');
-  const sr=await rpc(mkFrame(OP_RD,GRP_IMG,IMG_STATE,{}),6000);
+  // Small delay to let device finalise write before querying state
+  await sleep(300);
+  const sr=await rpc(mkFrame(OP_RD,GRP_IMG,IMG_STATE,{}),8000);
   const imgs=sr.body?.images||[];
-  const tgt=imgs.find(i=>(i.image??0)===imgNum&&i.slot===1)||imgs.find(i=>(i.image??0)===imgNum&&!i.active)||imgs.find(i=>!i.active);
-  if(!tgt)throw new Error(`No slot-1 image for img${imgNum}`);
-  if(!tgt.hash)throw new Error(`img${imgNum} has no hash`);
-  const resp=await rpc(mkFrame(OP_WR,GRP_IMG,IMG_STATE,{hash:new Uint8Array(tgt.hash),confirm:false}),8000);
-  if(getRC(resp.body)!==0)throw new Error('TEST rc='+getRC(resp.body));
+  logImageState(imgs, 'pre-TEST');
+
+  if(!imgs.length) throw new Error('Device returned no images in state response');
+
+  const tgt = findPendingImage(imgs, imgNum);
+  if(!tgt) throw new Error(`No candidate image found for img${imgNum} — check device image state in console`);
+
+  if(!tgt.hash){
+    // No hash — some minimal MCUboot builds omit it; try sending confirm without hash
+    // by using the image/slot fields instead (not standard, log warning)
+    log(`img${imgNum}: no hash in image state — attempting TEST without hash (non-standard)`, 'warn');
+    // Fall through: if device requires hash it will return rc!=0 and we handle it below
+  }
+
+  // If already pending, no need to re-send TEST
+  if(tgt.pending){
+    log(`img${imgNum} already marked pending — skipping TEST command`,'success');
+    return;
+  }
+
+  const payload = { confirm: false };
+  if(tgt.hash) payload.hash = new Uint8Array(tgt.hash);
+
+  const resp=await rpc(mkFrame(OP_WR,GRP_IMG,IMG_STATE,payload),8000);
+  const rc=getRC(resp.body);
+  if(rc!==0) throw new Error(`TEST command rejected by device: rc=${rc}. Check firmware supports test/confirm mode (not DirectXIP without revert).`);
   log(`img${imgNum} set for test boot`,'success');
 }
 
 async function confirmImg(imgNum){
   log(`CONFIRM img${imgNum}…`,'info');
-  const sr=await rpc(mkFrame(OP_RD,GRP_IMG,IMG_STATE,{}),6000);
+  await sleep(300);
+  const sr=await rpc(mkFrame(OP_RD,GRP_IMG,IMG_STATE,{}),8000);
   const imgs=sr.body?.images||[];
-  const tgt=imgs.find(i=>(i.image??0)===imgNum&&i.active&&!i.confirmed)||imgs.find(i=>(i.image??0)===imgNum&&!i.confirmed)||imgs.find(i=>!i.confirmed);
-  if(!tgt){log(`img${imgNum} already confirmed — skipping`,'warn');return;}
-  if(!tgt.hash)throw new Error(`img${imgNum} has no hash for CONFIRM`);
+  logImageState(imgs, 'pre-CONFIRM');
+
+  if(!imgs.length){ log('No images in state — skipping confirm','warn'); return; }
+
+  // After reboot: look for active+unconfirmed first, then any unconfirmed
+  const forImg = imgs.filter(i => (i.image ?? 0) === imgNum);
+  const tgt =
+    forImg.find(i => i.active && !i.confirmed)  ||
+    forImg.find(i => !i.confirmed)              ||
+    imgs.find(i  => i.active && !i.confirmed)   ||
+    imgs.find(i  => !i.confirmed);
+
+  if(!tgt){
+    log(`img${imgNum}: already confirmed or nothing to confirm — skipping`,'warn');
+    return;
+  }
+
+  if(!tgt.hash){
+    log(`img${imgNum}: no hash for CONFIRM — skipping (device may auto-confirm)`,'warn');
+    return;
+  }
+
   const resp=await rpc(mkFrame(OP_WR,GRP_IMG,IMG_STATE,{hash:new Uint8Array(tgt.hash),confirm:true}),8000);
-  if(getRC(resp.body)!==0)throw new Error('CONFIRM rc='+getRC(resp.body));
+  const rc=getRC(resp.body);
+  if(rc!==0) throw new Error(`CONFIRM rejected: rc=${rc}`);
   log(`img${imgNum} confirmed permanently`,'success');
 }
 
@@ -1155,7 +1225,7 @@ document.addEventListener('DOMContentLoaded',()=>{
   $('clearLogBtn').addEventListener('click',()=>$('console').innerHTML='');
   $('chunkSz').addEventListener('input',()=>$('devChunk').textContent=$('chunkSz').value+' B');
 
-  log('nRF Web DFU ready · MIT License','success');
+  log('nRF Web DFU ready','success');
   log('Supports: dfu_application.zip · dfu_mcuboot.zip · raw .bin','data');
   log('manifest.json format-version 0 and 1 · multi-image · nRF5340','data');
 });
