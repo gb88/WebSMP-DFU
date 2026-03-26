@@ -512,8 +512,8 @@ function log(msg,type='info'){
 }
 function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
 function toast(m,t='i'){const el=$('toast');el.textContent=m;el.className=`show t${t}`;clearTimeout(el._t);el._t=setTimeout(()=>el.className='',3500);}
-function setSt(txt,conn=false){$('connTxt').textContent=txt;const p=$('connPill');p.className='conn-pill'+(conn?' connected':'');}
-function ph(id,cls){const el=$(id);if(el)el.className='pipe-stage '+cls;}
+function setSt(txt,conn=false){$('gTxt').textContent=txt;$('gStatus').className='status-badge'+(conn?' connected':'');}
+function ph(id,cls){const el=$(id);if(el)el.className='phase '+cls;}
 function resetPhases(){['phV','phE','phU','phT','phR','phC'].forEach(id=>ph(id,''));}
 function fmtB(n){if(n<1024)return n+' B';if(n<1048576)return(n/1024).toFixed(1)+' KB';return(n/1048576).toFixed(2)+' MB';}
 function toHex(v){const a=v instanceof Uint8Array?v:new Uint8Array(v instanceof ArrayBuffer?v:v.buffer??v);return Array.from(a).map(b=>b.toString(16).padStart(2,'0')).join('');}
@@ -1294,22 +1294,7 @@ document.addEventListener('DOMContentLoaded',()=>{
 
   ['togErase','togUpgrade'].forEach(id=>$(id).addEventListener('click',()=>$(id).classList.toggle('on')));
   $('togLog').addEventListener('click',()=>{$('togLog').classList.toggle('on');logOn=$('togLog').classList.contains('on');$('console').style.display=logOn?'':'none';});
-  $('togScroll').addEventListener('click',()=>{
-    $('togScroll').classList.toggle('on');
-    autoScroll=$('togScroll').classList.contains('on');
-    // If re-enabling, jump to bottom immediately
-    if(autoScroll) $('console').scrollTop=$('console').scrollHeight;
-  });
-  // Allow manual scroll to temporarily pause autoscroll
-  $('console').addEventListener('scroll', () => {
-    const c=$('console');
-    const atBottom = c.scrollHeight - c.scrollTop - c.clientHeight < 32;
-    if(!atBottom && autoScroll){
-      // User scrolled up manually — pause autoscroll and reflect in toggle
-      autoScroll=false;
-      $('togScroll').classList.remove('on');
-    }
-  });
+  
   $('clearLogBtn').addEventListener('click',()=>$('console').innerHTML='');
   $('chunkSz').addEventListener('input',()=>$('devChunk').textContent=$('chunkSz').value+' B');
 
